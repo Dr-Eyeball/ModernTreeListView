@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Multi-target .NET 8 and .NET 9 for Windows Forms -->
+    <TargetFrameworks>net8.0-windows;net9.0-windows</TargetFrameworks>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Generate XML documentation for IntelliSense and NuGet -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <!-- NuGet Packaging -->
+    <PackageId>ModernTreeListView</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>ModernTreeListView Contributors</Authors>
+    <Company>ModernTreeListView</Company>
+    <Description>
+      A modern, high-performance TreeListView / TreeGrid control for WinForms (.NET 8+).
+      Features virtual mode (50k-500k+ nodes), custom cell editors, tri-state checkboxes,
+      drag &amp; drop with visual indicators, advanced filtering, multi-selection,
+      async loading, column sorting, theming, and a fluent API.
+    </Description>
+    <PackageTags>winforms;treelistview;treegrid;virtual;control;winforms-control;datagrid;treeview;listview</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/yourusername/ModernTreeListView</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/yourusername/ModernTreeListView</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Include root README and LICENSE in the NuGet package -->
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" Visible="false" />
+    <!-- Placeholder for package icon (add a real icon.png in the project root when available) -->
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>
