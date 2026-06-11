@@ -1,0 +1,65 @@
+name: Publish to NuGet
+
+on:
+  push:
+    tags:
+      # Trigger only on version tags like v1.0.0, v1.2.3-beta, etc.
+      - 'v*.*.*'
+
+jobs:
+  publish:
+    runs-on: windows-latest  # Required for net*-windows targets and WinForms
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for versioning/tags
+
+      - name: Setup .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Extract version from tag
+        id: get_version
+        run: |
+          # Remove leading 'v' from the tag (e.g. v1.0.0 -> 1.0.0)
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "Extracted version: $version"
+
+      - name: Build (Release)
+        run: dotnet build src/ModernTreeListView/ModernTreeListView.csproj -c Release --no-restore
+
+      - name: Pack NuGet package (with symbols)
+        run: >
+          dotnet pack src/ModernTreeListView/ModernTreeListView.csproj
+          -c Release
+          --no-build
+          --output ./artifacts
+          /p:Version=${{ steps.get_version.outputs.version }}
+          /p:PackageVersion=${{ steps.get_version.outputs.version }}
+          /p:ContinuousIntegrationBuild=true
+
+      - name: Publish to NuGet.org
+        run: >
+          dotnet nuget push ./artifacts/*.nupkg
+          --api-key ${{ secrets.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+
+      # Optionally publish the symbol package explicitly (usually included with the nupkg push)
+      - name: Publish symbol package (snupkg)
+        run: >
+          dotnet nuget push ./artifacts/*.snupkg
+          --api-key ${{ secrets.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+        continue-on-error: true  # snupkg may sometimes be included automatically

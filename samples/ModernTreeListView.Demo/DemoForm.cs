@@ -1,284 +1,314 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Linq;
-using System.Threading.Tasks;
 using System.Windows.Forms;
-
-using ModernTreeListView;
 
 namespace ModernTreeListView.Demo;
 
-/// <summary>
-/// Demo models and main form for the ModernTreeListView sample application.
-/// </summary>
-
-// ==================== DEMO MODELS ====================
+// ==================== DEMO MODEL ====================
 
 /// <summary>
-/// Lightweight record used for both normal and virtual demos.
+/// Immutable record used for both the in-memory org chart and the huge lazily-generated dataset.
+/// Demonstrates the control's first-class support for C# records via <c>ReplaceModel</c>.
 /// </summary>
 public record OrgItem(
     string Id,
     string Name,
-    string Type,
+    string Type,            // "Department" | "Team" | "Person" | "Contractor"
     string? Role = null,
-    DateTime? LastActive = null,
     int Headcount = 0,
+    DateTime? LastActive = null,
+    bool Active = true,
     List<OrgItem>? Children = null)
 {
+    /// <summary>Child items; always non-null (defaults to an empty list).</summary>
     public List<OrgItem> Children { get; init; } = Children ?? [];
 }
 
 /// <summary>
-/// Used for virtual mode demo — synthesized on demand, no large memory footprint.
+/// Demonstrates the full capability of <see cref="ModernTreeListView{TModel}"/>:
+/// fluent columns with formatters/alignment, lazy children loading (105,000+ nodes on demand),
+/// in-place editing (default + custom editors + validation), sorting, filtering, multi-selection,
+/// checkboxes, per-node icons, tree lines, themes, auto-fit columns, and programmatic API
+/// (SelectModel, Expand/CollapseAll, ExpandSubtree, BeginEdit, ReplaceModel, Reload).
 /// </summary>
-public record VirtualItem(long Id, string Name, string Type, bool IsFolder);
-
 public sealed class DemoForm : Form
 {
-    private readonly ModernTreeListView<OrgItem> _treeList;
-    private readonly Label _statusLabel;
+    private readonly ModernTreeListView<OrgItem> _tree;
+    private readonly ToolStrip _toolStrip;
     private readonly TextBox _filterBox;
+    private readonly Label _statusLabel;
 
-    private List<OrgItem> _data = [];
+    private List<OrgItem> _org;
+    private bool _bigDataMode;
+    private bool _darkMode;
+    private bool _iconsEnabled = true;
+    private int _addCounter;
 
-    // Virtual mode data (synthetic)
-    private bool _isVirtualMode;
-    private const int VirtualRootCount = 12;
+    private const string ReadyText =
+        "Ready • F2/Enter = edit • Tab = next cell • Double-click = edit • Click header = sort • " +
+        "Drag header edge = resize • Double-click edge = auto-fit • Type = search • +/-/* = expand/collapse • " +
+        "Space = check • Ctrl+A = select all • F5 = rebuild";
 
+    // ==================== ICONS (drawn in code, no resources needed) ====================
+
+    private static readonly Dictionary<string, Image> Icons = new()
+    {
+        ["Department"] = CreateFolderIcon(Color.FromArgb(244, 180, 76)),
+        ["Team"] = CreateTeamIcon(Color.FromArgb(32, 162, 152)),
+        ["Person"] = CreatePersonIcon(Color.FromArgb(96, 116, 145)),
+        ["Contractor"] = CreatePersonIcon(Color.FromArgb(173, 126, 188))
+    };
+
+    /// <summary>Builds the demo UI and wires up every feature of the control.</summary>
     public DemoForm()
     {
-        Text = "ModernTreeListView — Advanced Production Demo (.NET 8+)";
+        Text = "ModernTreeListView — Full Capability Demo (.NET 8+)";
         Size = new Size(1280, 820);
+        MinimumSize = new Size(900, 560);
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9.5f);
+        KeyPreview = true;
 
-        _data = CreateSampleData();
+        _org = CreateSampleData();
 
-        // ==================== CONTROL ====================
-        _treeList = new ModernTreeListView<OrgItem>
+        // ==================== THE CONTROL ====================
+        _tree = new ModernTreeListView<OrgItem>
         {
             Dock = DockStyle.Fill,
             RowHeight = 28,
             HeaderHeight = 36,
             ShowAlternatingRows = true,
             ShowGridLines = false,
-            SelectionBackColor = Color.FromArgb(0, 120, 212),
-            AllowDragDrop = false,
-            MultiSelect = false,
-            ShowCheckboxes = false
+            ShowTreeLines = true,
+            MultiSelect = true,
+            AutoFillLastColumn = true
         };
 
-        // Columns
-        _treeList
-            .AddColumn("Name", m => m.Name, width: 320, configure: c =>
-            {
-                c.Formatter = v => v?.ToString() ?? "";
-            })
-            .AddColumn("Type", m => m.Type, width: 110)
-            .AddColumn("Role / Details", m => m.Role ?? (m.Headcount > 0 ? $"{m.Headcount} people" : ""), width: 170)
-            .AddColumn("Last Active", m => m.LastActive, width: 150, configure: c =>
-            {
-                c.Formatter = v => v is DateTime dt ? dt.ToString("yyyy-MM-dd HH:mm") : "";
-                c.Alignment = HorizontalAlignment.Right;
-            });
+        ConfigureColumns();
+        ConfigureEditing();
+        ConfigureOrgMode();
+        _tree.SetIconGetter(GetIcon);
 
-        // Core binding (normal mode)
-        ConfigureNormalMode();
-
-        // ==================== EDITORS (Custom per column) ====================
-        ConfigureEditors();
-
-        // ==================== UI ====================
+        // ==================== CHROME ====================
         _statusLabel = new Label
         {
             Dock = DockStyle.Bottom,
             Height = 28,
             TextAlign = ContentAlignment.MiddleLeft,
             Padding = new Padding(8, 0, 8, 0),
-            BackColor = Color.FromArgb(247, 248, 250),
             BorderStyle = BorderStyle.FixedSingle,
-            Text = "Ready. Use the toolbar to explore Virtual Mode (100k nodes), Checkboxes, Drag & Drop, Editors, Filtering, Multi-Select, Async, and Dark Mode."
+            AutoEllipsis = true,
+            Text = ReadyText
         };
 
         _filterBox = new TextBox
         {
             Dock = DockStyle.Top,
-            Height = 28,
-            PlaceholderText = "Type to filter (searches all columns)..."
+            PlaceholderText = "Filter (matches Name, Type or Role; ancestors of matches stay visible and auto-expand)…"
         };
-        _filterBox.TextChanged += (_, _) =>
-        {
-            _treeList.SetFilterText(_filterBox.Text);
-        };
+        _filterBox.TextChanged += (_, _) => ApplyFilter();
 
-        var toolStrip = CreateToolStrip();
-        var container = new Panel { Dock = DockStyle.Fill };
-        container.Controls.Add(_treeList);
+        _toolStrip = CreateToolStrip();
+
+        var container = new Panel { Dock = DockStyle.Fill, Padding = new Padding(0, 2, 0, 0) };
+        container.Controls.Add(_tree);
 
         Controls.Add(container);
         Controls.Add(_filterBox);
-        Controls.Add(toolStrip);
+        Controls.Add(_toolStrip);
         Controls.Add(_statusLabel);
 
-        // Initial selection
-        if (_data.Count > 0)
-            _treeList.SelectModel(_data[0]);
-
-        // Events
         WireEvents();
+        ApplyChrome();
 
-        KeyPreview = true;
-        KeyDown += (s, e) =>
+        // Initial state: open a couple of branches and select the CEO programmatically.
+        _tree.Expand(_org[0]);
+        _tree.Expand(_org[1]);
+        _tree.SelectModel(_org[0].Children[0]);
+
+        KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.F5)
             {
-                _treeList.Rebuild();
+                _tree.Rebuild();
+                SetStatus("Rebuild() — visible rows recomputed from current expand state.");
                 e.Handled = true;
             }
-            if (e.KeyCode == Keys.Escape && _filterBox.Focused)
+            else if (e.KeyCode == Keys.Escape && _filterBox.Focused)
             {
-                _filterBox.Text = "";
-                _treeList.Focus();
+                _filterBox.Clear();
+                _tree.Focus();
             }
         };
     }
 
-    private void ConfigureNormalMode()
+    // ==================== COLUMNS ====================
+
+    private void ConfigureColumns()
     {
-        _isVirtualMode = false;
-        _treeList.VirtualMode = false;
+        _tree
+            // Tree column: expander + checkbox + icon + text all live here.
+            .AddColumn("Name", m => m.Name, width: 300)
 
-        _treeList
-            .SetRoots(_data)
-            .SetChildrenGetter(item => item.Children)
-            .SetHasChildrenGetter(item => item.Children.Count > 0 || item.Type != "Person")
-            .SetCellValueSetter((model, column, newValue) =>
+            // Custom in-place editor: a drop-down ComboBox with an explicit value extractor.
+            .AddColumn("Type", m => m.Type, width: 110, configure: c =>
             {
-                // Immutable record update pattern
-                OrgItem? updated = null;
-
-                if (column.Title == "Name" && newValue is string s && !string.IsNullOrWhiteSpace(s))
-                    updated = model with { Name = s };
-                else if (column.Title == "Role / Details" && newValue is string role)
-                    updated = model with { Role = string.IsNullOrWhiteSpace(role) ? null : role };
-                else if (column.Title == "Last Active" && DateTime.TryParse(newValue?.ToString(), out var dt))
-                    updated = model with { LastActive = dt };
-
-                if (updated != null)
+                c.EditorFactory = (_, value) =>
                 {
-                    ReplaceInData(model, updated);
-                    _treeList.ReplaceModel(model, updated);
-                }
+                    var cmb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+                    cmb.Items.AddRange(["Department", "Team", "Person", "Contractor"]);
+                    cmb.SelectedItem = value as string;
+                    if (cmb.SelectedIndex < 0) cmb.SelectedIndex = 2;
+                    return cmb;
+                };
+                c.EditorValueExtractor = editor => ((ComboBox)editor).SelectedItem;
+            })
+
+            .AddColumn("Role", m => m.Role, width: 190)
+
+            // Numeric column: right-aligned, formatted, edited with the default TextBox (right-aligned automatically).
+            .AddColumn("Headcount", m => m.Type is "Person" or "Contractor" ? null : m.Headcount, width: 95, configure: c =>
+            {
+                c.Alignment = HorizontalAlignment.Right;
+                c.Formatter = v => v is int i ? i.ToString("N0") : "";
+            })
+
+            // DateTime column: gets a DateTimePicker editor automatically.
+            .AddColumn("Last Active", m => m.LastActive, width: 145, configure: c =>
+            {
+                c.Alignment = HorizontalAlignment.Right;
+                c.Formatter = v => v is DateTime dt ? dt.ToString("yyyy-MM-dd HH:mm") : "";
+            })
+
+            // Bool column: gets a CheckBox editor automatically. AutoFillLastColumn stretches it.
+            .AddColumn("Active", m => m.Active, width: 80, configure: c =>
+            {
+                c.Alignment = HorizontalAlignment.Center;
+                c.Formatter = v => v is bool b ? (b ? "Yes" : "No") : "";
             });
     }
 
-    private void ConfigureVirtualMode()
+    // ==================== EDITING (immutable record pattern + validation) ====================
+
+    private void ConfigureEditing()
     {
-        // Virtual mode demo is handled by creating a separate ModernTreeListView<VirtualItem>
-        // control on demand (see SwitchToVirtualTree). This method is kept for compatibility
-        // with the original demo structure but does no work on the OrgItem tree.
-        _isVirtualMode = true;
+        _tree.SetCellValueSetter((model, column, value) =>
+        {
+            OrgItem? updated = column.Title switch
+            {
+                "Name" when value is string s && !string.IsNullOrWhiteSpace(s)
+                    => model with { Name = s.Trim() },
+                "Type" when value is string t
+                    => model with { Type = t },
+                "Role"
+                    => model with { Role = string.IsNullOrWhiteSpace(value?.ToString()) ? null : value!.ToString() },
+                "Headcount" when int.TryParse(value?.ToString(), out int hc) && hc >= 0
+                    => model with { Headcount = hc },
+                "Last Active" when value is DateTime dt
+                    => model with { LastActive = dt },
+                "Active" when value is bool b
+                    => model with { Active = b },
+                _ => null
+            };
+
+            if (updated is null || updated == model) return;
+
+            // Keep our own source collections consistent, then swap the instance inside the
+            // control while preserving expansion, children and selection.
+            ReplaceInSource(_org, model, updated);
+            _tree.ReplaceModel(model, updated);
+            SetStatus($"Edited \"{column.Title}\" of {updated.Name} (record replaced via ReplaceModel).");
+        });
+
+        // Validation hook: veto a commit before the setter runs.
+        _tree.CellEditCommitted += (_, e) =>
+        {
+            if (e.Column.Title == "Name" && string.IsNullOrWhiteSpace(e.ProposedValue?.ToString()))
+            {
+                e.Cancel = true;
+                SetStatus("Edit rejected — Name cannot be empty (vetoed in CellEditCommitted).");
+            }
+        };
+
+        _tree.CellEditCanceled += (_, e) =>
+            SetStatus($"Edit of \"{e.Column.Title}\" canceled — original value kept.");
     }
 
-    private ModernTreeListView<VirtualItem>? _virtualTree;
+    // ==================== DATA MODES ====================
 
-    private void SwitchToVirtualTree()
+    /// <summary>In-memory org chart: children come from the record's own list.</summary>
+    private void ConfigureOrgMode()
     {
-        if (_virtualTree != null)
+        _bigDataMode = false;
+        _tree
+            .SetChildrenGetter(m => m.Children)
+            .SetHasChildrenGetter(m => m.Children.Count > 0)
+            .SetRoots(_org);
+    }
+
+    /// <summary>
+    /// Huge dataset: 100 departments × 50 teams × 20 people = 105,100 nodes.
+    /// Nothing is materialized up front — children are synthesized only when a node is
+    /// first expanded, and SetHasChildrenGetter avoids enumerating just to draw expanders.
+    /// </summary>
+    private void ConfigureBigDataMode()
+    {
+        _bigDataMode = true;
+        _tree
+            .SetChildrenGetter(CreateSyntheticChildren)
+            .SetHasChildrenGetter(m => m.Type != "Person")
+            .SetRoots(Enumerable.Range(1, 100).Select(d =>
+                new OrgItem($"D{d}", $"Department {d:000}", "Department", Headcount: 1000)));
+    }
+
+    private static IEnumerable<OrgItem> CreateSyntheticChildren(OrgItem parent)
+    {
+        string[] roles = ["Engineer", "Senior Engineer", "Designer", "Analyst", "QA", "Manager"];
+
+        return parent.Type switch
         {
-            // Already in virtual mode in the UI
+            "Department" => Enumerable.Range(1, 50).Select(t =>
+                new OrgItem($"{parent.Id}-T{t}", $"Team {t:00}", "Team", Headcount: 20)),
+
+            "Team" => Enumerable.Range(1, 20).Select(p =>
+                new OrgItem(
+                    $"{parent.Id}-P{p}",
+                    $"Member {parent.Id}-{p:00}",
+                    "Person",
+                    Role: roles[(parent.Id.Length * 7 + p) % roles.Length],
+                    LastActive: DateTime.Now.AddHours(-((p * 13) % 200)),
+                    Active: p % 7 != 0)),
+
+            _ => []
+        };
+    }
+
+    // ==================== FILTERING ====================
+
+    private void ApplyFilter()
+    {
+        string query = _filterBox.Text.Trim();
+        if (query.Length == 0)
+        {
+            _tree.ClearFilter();
+            SetStatus("Filter cleared (expansion state from the filter is kept).");
             return;
         }
 
-        // Hide normal tree and create a virtual one for the demo
-        _treeList.Visible = false;
+        _tree.SetFilter(m =>
+            m.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+            m.Type.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+            (m.Role?.Contains(query, StringComparison.OrdinalIgnoreCase) ?? false));
 
-        _virtualTree = new ModernTreeListView<VirtualItem>
-        {
-            Dock = DockStyle.Fill,
-            RowHeight = 28,
-            HeaderHeight = 36,
-            ShowAlternatingRows = true,
-            VirtualMode = true,
-            VirtualRootCount = 100_000 / 50, // pretend we have many top-level "groups"
-            AllowDragDrop = true,
-            ShowCheckboxes = true,
-            MultiSelect = true
-        };
-
-        _virtualTree
-            .AddColumn("Name", v => v.Name, 320)
-            .AddColumn("Type", v => v.Type, 110)
-            .AddColumn("ID", v => v.Id, 120, c => c.Alignment = HorizontalAlignment.Right);
-
-        _virtualTree.SetVirtualRootGetter(i =>
-        {
-            // 2000 synthetic root groups
-            return new VirtualItem(100000 + i, $"Root Group {i + 1}", "Group", true);
-        });
-
-        _virtualTree.SetVirtualChildCountGetter(parent =>
-        {
-            // Each root has between 20 and 60 children
-            return 20 + (int)(parent.Id % 41);
-        });
-
-        _virtualTree.SetVirtualChildGetter((parent, idx) =>
-        {
-            long id = parent.Id * 1000 + idx;
-            bool folder = (idx % 7) == 0;
-            return new VirtualItem(id, folder ? $"Subfolder {idx}" : $"Leaf Item {idx}", folder ? "Folder" : "Item", folder);
-        });
-
-        // Nice checkbox + drag drop behavior for virtual
-        _virtualTree.NodeCheckStateChanged += (_, e) =>
-        {
-            UpdateStatus($"Check changed on virtual item: {e.Model.Name}");
-        };
-
-        _virtualTree.DragDropNode += (_, e) =>
-        {
-            UpdateStatus($"[Virtual DnD] Moved {e.Source.Name} → {e.Position} {e.Target.Name}");
-            // In real app you would update your backing store / re-query
-            _virtualTree.Rebuild();
-        };
-
-        // Add the virtual tree to the container
-        var container = (Panel)_treeList.Parent!;
-        container.Controls.Add(_virtualTree);
-        _virtualTree.BringToFront();
-
-        UpdateStatus("Virtual Mode active — 100,000+ nodes (synthesized on demand). Expand nodes, use checkboxes, drag & drop, multi-select.");
+        SetStatus(_bigDataMode
+            ? $"Filter \"{query}\" applied — note: filtering evaluates descendants, so the full lazy tree was materialized."
+            : $"Filter \"{query}\" applied — matches and their ancestors stay visible; ancestors auto-expanded.");
     }
 
-    private void ConfigureEditors()
-    {
-        // Column 1 "Type" → ComboBox editor
-        _treeList.SetColumnEditor(1, context =>
-        {
-            var cmb = new ComboBox
-            {
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Items = { "Department", "Team", "Person", "Contractor" }
-            };
-            if (context.Value is string s && cmb.Items.Contains(s))
-                cmb.SelectedItem = s;
-            else
-                cmb.SelectedIndex = 0;
-            return cmb;
-        });
-
-        // Column 3 "Last Active" → DateTimePicker (already default, but we can force)
-        _treeList.SetColumnEditor(3, context =>
-        {
-            var dtp = new DateTimePicker { Format = DateTimePickerFormat.Short };
-            if (context.Value is DateTime dt)
-                dtp.Value = dt;
-            return dtp;
-        });
-    }
+    // ==================== TOOLBAR ====================
 
     private ToolStrip CreateToolStrip()
     {
@@ -286,312 +316,426 @@ public sealed class DemoForm : Form
         {
             Dock = DockStyle.Top,
             GripStyle = ToolStripGripStyle.Hidden,
-            BackColor = Color.FromArgb(247, 248, 250)
+            Padding = new Padding(4, 2, 4, 2)
         };
 
-        strip.Items.Add(new ToolStripLabel("  ModernTreeListView Advanced Demo   ") { Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) });
-
-        // === Virtual Mode ===
-        var btnVirtual = new ToolStripButton("Virtual Mode (100k nodes)") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnVirtual.Click += (_, _) =>
+        // ----- Appearance -----
+        var appearance = new ToolStripDropDownButton("Appearance");
+        appearance.DropDownItems.Add(MakeToggle("Dark Theme", false, on =>
         {
-            SwitchToVirtualTree();
-        };
-        strip.Items.Add(btnVirtual);
-
-        var btnBackToNormal = new ToolStripButton("Back to Normal Data") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnBackToNormal.Click += (_, _) =>
+            _darkMode = on;
+            _tree.ApplyTheme(on ? TreeListTheme.Dark : TreeListTheme.Light);
+            ApplyChrome();
+            SetStatus($"ApplyTheme(TreeListTheme.{(on ? "Dark" : "Light")}) — every color is also individually settable.");
+        }));
+        appearance.DropDownItems.Add(MakeToggle("Tree Connector Lines", true, on => _tree.ShowTreeLines = on));
+        appearance.DropDownItems.Add(MakeToggle("Grid Lines", false, on => { _tree.ShowGridLines = on; _tree.Invalidate(); }));
+        appearance.DropDownItems.Add(MakeToggle("Alternating Row Shading", true, on => { _tree.ShowAlternatingRows = on; _tree.Invalidate(); }));
+        appearance.DropDownItems.Add(MakeToggle("Row Icons", true, on =>
         {
-            if (_virtualTree != null)
+            _iconsEnabled = on;
+            _tree.SetIconGetter(GetIcon);
+        }));
+        appearance.DropDownItems.Add(MakeToggle("Auto-Fill Last Column", true, on => _tree.AutoFillLastColumn = on));
+        appearance.DropDownItems.Add(MakeToggle("Compact Rows", false, on => _tree.RowHeight = on ? 22 : 28));
+        appearance.DropDownItems.Add(new ToolStripSeparator());
+        appearance.DropDownItems.Add(MakeAction("Auto-Fit All Columns", () =>
+        {
+            for (int i = 0; i < _tree.Columns.Count; i++)
+                _tree.AutoFitColumn(i);
+            SetStatus("AutoFitColumn() on every column (also: double-click a header divider).");
+        }));
+        strip.Items.Add(appearance);
+
+        // ----- Tree / selection -----
+        var tree = new ToolStripDropDownButton("Tree");
+        tree.DropDownItems.Add(MakeAction("Expand All", ExpandAllGuarded));
+        tree.DropDownItems.Add(MakeAction("Collapse All", () =>
+        {
+            _tree.CollapseAll();
+            SetStatus("CollapseAll() — every loaded node collapsed.");
+        }));
+        tree.DropDownItems.Add(MakeAction("Expand Selected Subtree  (*)", () =>
+        {
+            if (_tree.SelectedModel is { } sel)
             {
-                _virtualTree.Dispose();
-                _virtualTree = null;
+                _tree.ExpandSubtree(sel);
+                SetStatus($"ExpandSubtree({sel.Name}) — whole branch opened, loading children on demand.");
             }
-            _treeList.Visible = true;
-            ConfigureNormalMode();
-            _treeList.Rebuild();
-            UpdateStatus("Returned to normal (in-memory) mode.");
-        };
-        strip.Items.Add(btnBackToNormal);
+            else SetStatus("Select a row first.");
+        }));
+        tree.DropDownItems.Add(new ToolStripSeparator());
+        tree.DropDownItems.Add(MakeToggle("Multi-Select (Ctrl/Shift)", true, on =>
+        {
+            _tree.MultiSelect = on;
+            SetStatus(on ? "Multi-select on: Ctrl+Click toggles, Shift+Click/arrows extend, Ctrl+A selects all." : "Multi-select off.");
+        }));
+        tree.DropDownItems.Add(MakeToggle("Checkboxes", false, on =>
+        {
+            _tree.ShowCheckBoxes = on;
+            SetStatus(on ? "Checkboxes on: click the box or press Space (toggles every selected row at once)." : "Checkboxes off.");
+        }));
+        tree.DropDownItems.Add(MakeAction("Check Selected Rows (SetChecked)", () =>
+        {
+            var models = _tree.SelectedModels;
+            if (models.Count == 0) { SetStatus("Select one or more rows first."); return; }
+            _tree.ShowCheckBoxes = true;
+            foreach (var m in models)
+                _tree.SetChecked(m, true);
+            SetStatus($"SetChecked(model, true) applied to {models.Count} row(s) programmatically.");
+        }));
+        tree.DropDownItems.Add(new ToolStripSeparator());
+        tree.DropDownItems.Add(MakeAction("Select the CEO (SelectModel)", () =>
+        {
+            if (_bigDataMode) { SetStatus("Switch back to the org sample first (Data menu)."); return; }
+            _tree.SelectModel(_org[0].Children[0]);
+            SetStatus("SelectModel() — ancestors were expanded automatically and the row scrolled into view.");
+        }));
+        tree.DropDownItems.Add(MakeAction("Clear Selection", () => _tree.ClearSelection()));
+        strip.Items.Add(tree);
+
+        // ----- Data -----
+        var data = new ToolStripDropDownButton("Data");
+        data.DropDownItems.Add(MakeAction("Add Person Under Selected", AddPersonToSelected));
+        data.DropDownItems.Add(MakeAction("Remove Selected", RemoveSelected));
+        data.DropDownItems.Add(MakeAction("Rename Selected (BeginEdit)", () =>
+        {
+            if (_tree.SelectedRowIndex >= 0)
+                _tree.BeginEdit(_tree.SelectedRowIndex, 0);
+            else
+                SetStatus("Select a row first.");
+        }));
+        data.DropDownItems.Add(new ToolStripSeparator());
+        data.DropDownItems.Add(MakeAction("Reload (structural refresh)", () =>
+        {
+            _tree.Reload();
+            SetStatus("Reload() — children re-queried from the getter; expansion state reset.");
+        }));
+        data.DropDownItems.Add(new ToolStripSeparator());
+        data.DropDownItems.Add(MakeAction("Load Huge Dataset (105,100 lazy nodes)", () =>
+        {
+            ConfigureBigDataMode();
+            SetStatus("105,100 nodes available — none loaded yet. Expand anything: children are synthesized on first expand.");
+        }));
+        data.DropDownItems.Add(MakeAction("Load Org Sample Data", () =>
+        {
+            ConfigureOrgMode();
+            _tree.Expand(_org[0]);
+            _tree.SelectModel(_org[0].Children[0]);
+            SetStatus("Org sample restored.");
+        }));
+        strip.Items.Add(data);
+
+        // ----- Sort -----
+        var sort = new ToolStripDropDownButton("Sort");
+        sort.DropDownItems.Add(MakeAction("By Name ↑", () => _tree.Sort(0, SortOrder.Ascending)));
+        sort.DropDownItems.Add(MakeAction("By Headcount ↓", () => _tree.Sort(3, SortOrder.Descending)));
+        sort.DropDownItems.Add(MakeAction("By Last Active ↓", () => _tree.Sort(4, SortOrder.Descending)));
+        sort.DropDownItems.Add(new ToolStripSeparator());
+        sort.DropDownItems.Add(MakeAction("Clear Sort", () => _tree.ClearSort()));
+        strip.Items.Add(sort);
 
         strip.Items.Add(new ToolStripSeparator());
 
-        // === Checkboxes ===
-        var btnCheckboxes = new ToolStripButton("Toggle Checkboxes") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnCheckboxes.Click += (_, _) =>
+        // ----- Inspection -----
+        strip.Items.Add(MakeButton("Selected…", () =>
         {
-            _treeList.ShowCheckboxes = !_treeList.ShowCheckboxes;
-            UpdateStatus(_treeList.ShowCheckboxes ? "Checkboxes enabled (tri-state supported)" : "Checkboxes disabled");
-        };
-        strip.Items.Add(btnCheckboxes);
-
-        var btnGetChecked = new ToolStripButton("Show Checked Count") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnGetChecked.Click += (_, _) =>
+            var sel = _tree.SelectedModels;
+            MessageBox.Show(
+                $"SelectedModels: {sel.Count}\n\n" + string.Join("\n", sel.Take(15).Select(m => "• " + m.Name)) +
+                (sel.Count > 15 ? "\n…" : ""),
+                "Selection", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }));
+        strip.Items.Add(MakeButton("Checked…", () =>
         {
-            var checkedItems = _treeList.GetCheckedItems();
-            MessageBox.Show($"Checked items: {checkedItems.Count}\n\nFirst few:\n" +
-                string.Join("\n", checkedItems.Take(8).Select(x => "• " + x.Name)),
-                "Checked Items");
-        };
-        strip.Items.Add(btnGetChecked);
-
-        strip.Items.Add(new ToolStripSeparator());
-
-        // === Drag & Drop ===
-        var btnDragDrop = new ToolStripButton("Toggle Drag & Drop") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnDragDrop.Click += (_, _) =>
-        {
-            _treeList.AllowDragDrop = !_treeList.AllowDragDrop;
-            UpdateStatus(_treeList.AllowDragDrop ? "Drag & Drop enabled — drag rows to reorder or move into parents" : "Drag & Drop disabled");
-        };
-        strip.Items.Add(btnDragDrop);
-
-        strip.Items.Add(new ToolStripSeparator());
-
-        // === Multi-Select ===
-        var btnMulti = new ToolStripButton("Toggle Multi-Select") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnMulti.Click += (_, _) =>
-        {
-            _treeList.MultiSelect = !_treeList.MultiSelect;
-            UpdateStatus(_treeList.MultiSelect ? "Multi-select enabled (Ctrl/Shift + click or arrows)" : "Multi-select disabled");
-        };
-        strip.Items.Add(btnMulti);
-
-        var btnSelected = new ToolStripButton("Show Selected") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnSelected.Click += (_, _) =>
-        {
-            var sel = _treeList.SelectedModels;
-            MessageBox.Show($"Selected: {sel.Count}\n" + string.Join("\n", sel.Take(10).Select(m => "• " + m.Name)), "Selection");
-        };
-        strip.Items.Add(btnSelected);
-
-        strip.Items.Add(new ToolStripSeparator());
-
-        // === Theming ===
-        var btnDark = new ToolStripButton("Toggle Dark Mode") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnDark.Click += (_, _) =>
-        {
-            _treeList.UseDarkMode = !_treeList.UseDarkMode;
-            _statusLabel.BackColor = _treeList.UseDarkMode ? Color.FromArgb(45, 45, 48) : Color.FromArgb(247, 248, 250);
-            UpdateStatus(_treeList.UseDarkMode ? "Dark mode enabled" : "Light mode enabled");
-        };
-        strip.Items.Add(btnDark);
-
-        strip.Items.Add(new ToolStripSeparator());
-
-        // === Async demo ===
-        var btnAsync = new ToolStripButton("Demo Async Children") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnAsync.Click += async (_, _) =>
-        {
-            await DemoAsyncChildren();
-        };
-        strip.Items.Add(btnAsync);
-
-        strip.Items.Add(new ToolStripSeparator());
-
-        // === Expand / Collapse helpers ===
-        var btnExpandAll = new ToolStripButton("Expand All") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnExpandAll.Click += (_, _) => ExpandAll(_data);
-        strip.Items.Add(btnExpandAll);
-
-        var btnCollapseAll = new ToolStripButton("Collapse All") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-        btnCollapseAll.Click += (_, _) => { CollapseAll(_data); _treeList.Rebuild(); };
-        strip.Items.Add(btnCollapseAll);
-
-        strip.Items.Add(new ToolStripSeparator());
-
-        var lblHint = new ToolStripLabel("Tip: Click headers to sort • Double-click to edit • Space toggles checkbox when focused • F5 = Rebuild");
-        lblHint.ForeColor = Color.FromArgb(108, 117, 125);
-        strip.Items.Add(lblHint);
+            var chk = _tree.CheckedModels;
+            MessageBox.Show(
+                $"CheckedModels: {chk.Count}\n\n" + string.Join("\n", chk.Take(15).Select(m => "• " + m.Name)) +
+                (chk.Count > 15 ? "\n…" : ""),
+                "Checked Items", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }));
 
         return strip;
     }
 
-    private async Task DemoAsyncChildren()
+    private void ExpandAllGuarded()
     {
-        var sel = _treeList.SelectedModel;
-        if (sel == null)
+        if (_bigDataMode &&
+            MessageBox.Show(
+                "Expand All in the huge dataset materializes all 105,100 nodes. Continue?",
+                "Expand All", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
         {
-            MessageBox.Show("Select a node first to load async children into it.");
             return;
         }
 
-        // Temporarily switch this node to use async loading for demo
-        UpdateStatus("Loading children asynchronously (simulated 700ms delay)...");
-
-        // We simulate by clearing children and using the async getter for one expansion
-        sel.Children.Clear();
-
-        // Install a one-shot async getter
-        var originalAsync = _treeList; // we just call Rebuild after
-
-        // Force an async load by temporarily setting the async getter
-        Func<OrgItem, Task<IEnumerable<OrgItem>>> asyncLoader = async item =>
-        {
-            await Task.Delay(700);
-            return
-            [
-                new OrgItem(Guid.NewGuid().ToString("N")[..6], "Async Engineer 1", "Person", Role: "Engineer"),
-                new OrgItem(Guid.NewGuid().ToString("N")[..6], "Async Engineer 2", "Person", Role: "Engineer"),
-                new OrgItem(Guid.NewGuid().ToString("N")[..6], "Async QA", "Person", Role: "QA")
-            ];
-        };
-
-        // Because the control already supports SetChildrenGetterAsync, we can just expand after setting it
-        // For the demo we simply call Expand which will use the current getter. We temporarily replace the getter.
-        var previous = _treeList; // marker
-
-        // We use a small trick: directly call the internal behavior by adding children after delay and rebuilding.
-        await Task.Delay(700);
-
-        sel.Children.AddRange(
-        [
-            new OrgItem(Guid.NewGuid().ToString("N")[..6], "Async Engineer 1", "Person", Role: "Engineer"),
-            new OrgItem(Guid.NewGuid().ToString("N")[..6], "Async Engineer 2", "Person", Role: "Engineer"),
-            new OrgItem(Guid.NewGuid().ToString("N")[..6], "Async QA Lead", "Person", Role: "QA")
-        ]);
-
-        _treeList.Rebuild();
-        _treeList.SelectModel(sel);
-        UpdateStatus("Async children loaded and inserted.");
+        _tree.ExpandAll();
+        SetStatus("ExpandAll() — every node expanded, children loaded on demand.");
     }
+
+    // ==================== STRUCTURAL CHANGES (add / remove) ====================
+
+    private void AddPersonToSelected()
+    {
+        if (_bigDataMode) { SetStatus("Structural editing is demoed on the org sample (Data → Load Org Sample Data)."); return; }
+
+        var sel = _tree.SelectedModel;
+        if (sel is null || sel.Type is "Person" or "Contractor")
+        {
+            SetStatus("Select a Department or Team to add a person under.");
+            return;
+        }
+
+        var person = new OrgItem(
+            Guid.NewGuid().ToString("N")[..8],
+            $"New Member {++_addCounter}",
+            "Person",
+            Role: "Engineer",
+            LastActive: DateTime.Now);
+
+        sel.Children.Add(person);
+
+        // Structural change in the source -> Reload, then re-open the path and select the new row.
+        _tree.Reload();
+        ExpandPathTo(person);
+        _tree.SelectModel(person);
+        SetStatus($"Added {person.Name} under {sel.Name}; Reload() + SelectModel() restored the view.");
+    }
+
+    private void RemoveSelected()
+    {
+        if (_bigDataMode) { SetStatus("Structural editing is demoed on the org sample (Data → Load Org Sample Data)."); return; }
+
+        var sel = _tree.SelectedModel;
+        if (sel is null) { SetStatus("Select a row to remove."); return; }
+
+        var path = new List<OrgItem>();
+        if (!TryFindPath(_org, sel, path)) return;
+
+        var parent = path.Count > 1 ? path[^2] : null;
+        if (parent != null) parent.Children.Remove(sel);
+        else _org.Remove(sel);
+
+        _tree.Reload();
+        if (parent != null)
+        {
+            ExpandPathTo(parent);
+            _tree.SelectModel(parent);
+        }
+        SetStatus($"Removed {sel.Name}" + (parent != null ? $" from {parent.Name}." : " (root)."));
+    }
+
+    private void ExpandPathTo(OrgItem target)
+    {
+        var path = new List<OrgItem>();
+        if (!TryFindPath(_org, target, path)) return;
+        foreach (var ancestor in path.Take(path.Count - 1))
+            _tree.Expand(ancestor);
+    }
+
+    private static bool TryFindPath(List<OrgItem> roots, OrgItem target, List<OrgItem> path)
+    {
+        foreach (var item in roots)
+        {
+            path.Add(item);
+            if (ReferenceEquals(item, target)) return true;
+            if (TryFindPath(item.Children, target, path)) return true;
+            path.RemoveAt(path.Count - 1);
+        }
+        return false;
+    }
+
+    private static bool ReplaceInSource(List<OrgItem> list, OrgItem oldItem, OrgItem newItem)
+    {
+        for (int i = 0; i < list.Count; i++)
+        {
+            if (ReferenceEquals(list[i], oldItem))
+            {
+                list[i] = newItem;
+                return true;
+            }
+            if (ReplaceInSource(list[i].Children, oldItem, newItem))
+                return true;
+        }
+        return false;
+    }
+
+    // ==================== EVENTS ====================
 
     private void WireEvents()
     {
-        _treeList.SelectionChanged += (_, _) =>
+        _tree.SelectionChanged += (_, _) =>
         {
-            var sel = _treeList.SelectedModels;
-            _statusLabel.Text = sel.Count == 1
-                ? $"Selected: {sel[0].Name}  •  Type: {sel[0].Type}"
-                : $"Selected {sel.Count} items";
-        };
-
-        _treeList.NodeExpanded += (_, e) =>
-        {
-            UpdateStatus($"Expanded: {e.Model.Name}");
-        };
-
-        _treeList.NodeCheckStateChanged += (_, e) =>
-        {
-            UpdateStatus($"Checkbox changed: {e.Model.Name} → state updated (tri-state propagated if parent)");
-        };
-
-        _treeList.ColumnSortChanged += (_, _) =>
-        {
-            var col = _treeList.SortColumn;
-            UpdateStatus(col.HasValue
-                ? $"Sorted by column {_treeList.Columns[col.Value].Title} ({_treeList.SortOrder})"
-                : "Sort cleared");
-        };
-
-        _treeList.DragDropNode += (_, e) =>
-        {
-            // In a real app you would move the item in your data source here.
-            UpdateStatus($"[DragDrop] {e.Source.Name} dropped {e.Position} {e.Target.Name}. Rebuild recommended after mutating your data.");
-            // For the demo we just rebuild (the actual move would be done by the user in their model)
-            _treeList.Rebuild();
-        };
-
-        _treeList.DragOverNode += (_, e) =>
-        {
-            // Example: prevent dropping a Department into a Person
-            if (e.Source.Type == "Department" && e.Target.Type == "Person")
-                e.Effect = DragDropEffects.None;
-        };
-    }
-
-    private void UpdateStatus(string text)
-    {
-        _statusLabel.Text = text;
-    }
-
-    // ==================== DATA HELPERS ====================
-    private void ExpandAll(IEnumerable<OrgItem> items)
-    {
-        foreach (var item in items)
-        {
-            _treeList.Expand(item);
-            if (item.Children.Count > 0)
-                ExpandAll(item.Children);
-        }
-        _treeList.Rebuild();
-    }
-
-    private void CollapseAll(IEnumerable<OrgItem> items)
-    {
-        foreach (var item in items)
-        {
-            _treeList.Collapse(item);
-            if (item.Children.Count > 0)
-                CollapseAll(item.Children);
-        }
-    }
-
-    private void ReplaceInData(OrgItem oldItem, OrgItem newItem)
-    {
-        bool ReplaceInList(List<OrgItem> list)
-        {
-            for (int i = 0; i < list.Count; i++)
+            var sel = _tree.SelectedModels;
+            SetStatus(sel.Count switch
             {
-                if (ReferenceEquals(list[i], oldItem))
-                {
-                    list[i] = newItem;
-                    return true;
-                }
-                if (ReplaceInList(list[i].Children))
-                    return true;
-            }
-            return false;
-        }
-        ReplaceInList(_data);
+                0 => "Nothing selected.",
+                1 => $"Selected: {sel[0].Name}  •  {sel[0].Type}" + (sel[0].Role is { } r ? $"  •  {r}" : ""),
+                _ => $"{sel.Count} rows selected (SelectedModels, in visible order)."
+            });
+        };
+
+        _tree.NodeExpanded += (_, e) => SetStatus($"NodeExpanded: {e.Model.Name}");
+        _tree.NodeCollapsed += (_, e) => SetStatus($"NodeCollapsed: {e.Model.Name}");
+
+        _tree.CheckedChanged += (_, e) =>
+            SetStatus($"CheckedChanged: {e.Model.Name} → total checked: {_tree.CheckedModels.Count}");
+
+        _tree.ColumnSortChanged += (_, _) =>
+            SetStatus(_tree.SortColumn is { } col
+                ? $"ColumnSortChanged: \"{_tree.Columns[col].Title}\" {_tree.SortOrder} (stable, per sibling group; click again to cycle)."
+                : "ColumnSortChanged: sort cleared — original sibling order restored.");
     }
+
+    private void SetStatus(string text) => _statusLabel.Text = text;
+
+    // ==================== THEME-AWARE CHROME ====================
+
+    private void ApplyChrome()
+    {
+        var theme = _tree.Theme;
+        BackColor = theme.BackColor;
+
+        _toolStrip.BackColor = theme.HeaderBackColor;
+        _toolStrip.ForeColor = theme.HeaderForeColor;
+        foreach (ToolStripItem item in _toolStrip.Items)
+            item.ForeColor = theme.HeaderForeColor;
+
+        _statusLabel.BackColor = theme.HeaderBackColor;
+        _statusLabel.ForeColor = theme.ForeColor;
+
+        _filterBox.BackColor = theme.EditorBackColor;
+        _filterBox.ForeColor = theme.EditorForeColor;
+    }
+
+    // ==================== TOOLSTRIP HELPERS ====================
+
+    private static ToolStripMenuItem MakeToggle(string text, bool initial, Action<bool> apply)
+    {
+        var item = new ToolStripMenuItem(text) { CheckOnClick = true, Checked = initial };
+        item.CheckedChanged += (_, _) => apply(item.Checked);
+        return item;
+    }
+
+    private static ToolStripMenuItem MakeAction(string text, Action action)
+    {
+        var item = new ToolStripMenuItem(text);
+        item.Click += (_, _) => action();
+        return item;
+    }
+
+    private static ToolStripButton MakeButton(string text, Action action)
+    {
+        var btn = new ToolStripButton(text) { DisplayStyle = ToolStripItemDisplayStyle.Text };
+        btn.Click += (_, _) => action();
+        return btn;
+    }
+
+    // ==================== ICON DRAWING ====================
+
+    private Image? GetIcon(OrgItem m) =>
+        _iconsEnabled && Icons.TryGetValue(m.Type, out var img) ? img : null;
+
+    private static Image CreateFolderIcon(Color color)
+    {
+        var bmp = new Bitmap(16, 16);
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var brush = new SolidBrush(color);
+        using var darker = new SolidBrush(ControlPaint.Dark(color, 0.1f));
+        g.FillRectangle(darker, 1, 3, 7, 4);
+        g.FillRectangle(brush, 1, 5, 14, 9);
+        return bmp;
+    }
+
+    private static Image CreateTeamIcon(Color color)
+    {
+        var bmp = new Bitmap(16, 16);
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var back = new SolidBrush(ControlPaint.Light(color, 0.6f));
+        using var front = new SolidBrush(color);
+        g.FillEllipse(back, 8, 2, 6, 6);
+        g.FillEllipse(back, 7, 9, 8, 6);
+        g.FillEllipse(front, 2, 3, 7, 7);
+        g.FillEllipse(front, 1, 10, 9, 6);
+        return bmp;
+    }
+
+    private static Image CreatePersonIcon(Color color)
+    {
+        var bmp = new Bitmap(16, 16);
+        using var g = Graphics.FromImage(bmp);
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var brush = new SolidBrush(color);
+        g.FillEllipse(brush, 5, 1, 6, 6);
+        g.FillEllipse(brush, 2, 9, 12, 9);
+        return bmp;
+    }
+
+    // ==================== SAMPLE DATA ====================
 
     private static List<OrgItem> CreateSampleData()
     {
-        // Same rich sample tree as before (slightly extended)
+        var now = DateTime.Now;
+
+        var exec = new OrgItem("exec", "Executive", "Department", Headcount: 4,
+            Children:
+            [
+                new OrgItem("ceo", "Dr. Elena Voss", "Person", Role: "CEO", LastActive: now.AddMinutes(-15)),
+                new OrgItem("coo", "Marcus Bell", "Person", Role: "COO", LastActive: now.AddHours(-4)),
+                new OrgItem("cfo", "Priya Nair", "Person", Role: "CFO", LastActive: now.AddHours(-26))
+            ]);
+
         var engineering = new OrgItem("eng", "Engineering", "Department", Headcount: 87,
-            Children: [
+            Children:
+            [
                 new OrgItem("eng-plat", "Platform", "Team", Headcount: 32,
-                    Children: [
-                        new OrgItem("p1", "Alex Rivera", "Person", Role: "Principal Engineer", LastActive: DateTime.Now.AddHours(-3)),
-                        new OrgItem("p2", "Jordan Hale", "Person", Role: "Staff Engineer", LastActive: DateTime.Now.AddDays(-1)),
-                        new OrgItem("p3", "Sam Patel", "Person", Role: "Senior Engineer", LastActive: DateTime.Now.AddHours(-9)),
+                    Children:
+                    [
+                        new OrgItem("p1", "Alex Rivera", "Person", Role: "Principal Engineer", LastActive: now.AddHours(-3)),
+                        new OrgItem("p2", "Jordan Hale", "Person", Role: "Staff Engineer", LastActive: now.AddDays(-1)),
+                        new OrgItem("p3", "Sam Patel", "Person", Role: "Senior Engineer", LastActive: now.AddHours(-9)),
+                        new OrgItem("p4", "Nikola Saric", "Contractor", Role: "SRE (contract)", LastActive: now.AddDays(-12), Active: false)
                     ]),
                 new OrgItem("eng-app", "Applications", "Team", Headcount: 41,
-                    Children: [
-                        new OrgItem("a1", "Taylor Kim", "Person", Role: "Engineering Manager", LastActive: DateTime.Now.AddMinutes(-40)),
-                        new OrgItem("a2", "Casey Brooks", "Person", Role: "Senior Engineer", LastActive: DateTime.Now.AddHours(-2)),
-                        new OrgItem("a3", "Riley Quinn", "Person", Role: "Engineer", LastActive: DateTime.Now.AddDays(-2)),
-                        new OrgItem("a4", "Morgan Ellis", "Person", Role: "Engineer", LastActive: DateTime.Now.AddHours(-11)),
+                    Children:
+                    [
+                        new OrgItem("a1", "Taylor Kim", "Person", Role: "Engineering Manager", LastActive: now.AddMinutes(-40)),
+                        new OrgItem("a2", "Casey Brooks", "Person", Role: "Senior Engineer", LastActive: now.AddHours(-2)),
+                        new OrgItem("a3", "Riley Quinn", "Person", Role: "Engineer", LastActive: now.AddDays(-2)),
+                        new OrgItem("a4", "Morgan Ellis", "Person", Role: "Engineer", LastActive: now.AddHours(-11))
                     ]),
                 new OrgItem("eng-qa", "Quality & Reliability", "Team", Headcount: 14,
-                    Children: [ new OrgItem("q1", "Drew Santos", "Person", Role: "QA Lead", LastActive: DateTime.Now.AddHours(-5)) ])
+                    Children:
+                    [
+                        new OrgItem("q1", "Drew Santos", "Person", Role: "QA Lead", LastActive: now.AddHours(-5)),
+                        new OrgItem("q2", "Ines Fontaine", "Person", Role: "QA Engineer", LastActive: now.AddDays(-3))
+                    ])
             ]);
 
         var design = new OrgItem("des", "Design", "Department", Headcount: 19,
-            Children: [
+            Children:
+            [
                 new OrgItem("des-prod", "Product Design", "Team", Headcount: 12,
-                    Children: [
-                        new OrgItem("d1", "Jamie Torres", "Person", Role: "Design Director", LastActive: DateTime.Now.AddHours(-1)),
-                        new OrgItem("d2", "Avery Lane", "Person", Role: "Senior Product Designer", LastActive: DateTime.Now.AddDays(-1)),
+                    Children:
+                    [
+                        new OrgItem("d1", "Jamie Torres", "Person", Role: "Design Director", LastActive: now.AddHours(-1)),
+                        new OrgItem("d2", "Avery Lane", "Person", Role: "Senior Product Designer", LastActive: now.AddDays(-1))
                     ]),
                 new OrgItem("des-brand", "Brand & Marketing", "Team", Headcount: 7)
             ]);
 
-        var hr = new OrgItem("hr", "People Operations", "Department", Headcount: 11,
-            Children: [
+        var people = new OrgItem("hr", "People Operations", "Department", Headcount: 11,
+            Children:
+            [
                 new OrgItem("hr-t1", "People Partners", "Team", Headcount: 5,
-                    Children: [ new OrgItem("h1", "Cameron West", "Person", Role: "People Partner", LastActive: DateTime.Now.AddHours(-7)) ]),
+                    Children:
+                    [
+                        new OrgItem("h1", "Cameron West", "Person", Role: "People Partner", LastActive: now.AddHours(-7))
+                    ]),
                 new OrgItem("hr-recruit", "Talent Acquisition", "Team", Headcount: 6)
             ]);
 
-        var exec = new OrgItem("exec", "Executive", "Department", Headcount: 4,
-            Children: [
-                new OrgItem("ceo", "Dr. Elena Voss", "Person", Role: "CEO", LastActive: DateTime.Now.AddMinutes(-15)),
-                new OrgItem("coo", "Marcus Bell", "Person", Role: "COO", LastActive: DateTime.Now.AddHours(-4)),
-            ]);
-
-        return [exec, engineering, design, hr];
+        return [exec, engineering, design, people];
     }
 }
-

@@ -1,28 +1,32 @@
 # ModernTreeListView
 
 [![NuGet](https://img.shields.io/nuget/v/ModernTreeListView.svg)](https://www.nuget.org/packages/ModernTreeListView)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0-blueviolet)](https://dotnet.microsoft.com/)
 
-A modern, high-performance, production-ready **TreeListView / TreeGrid** control for Windows Forms (.NET 8 and later).
+A modern, lightweight **TreeListView / TreeGrid** control for Windows Forms (.NET 8+) — a tree and a multi-column list view in a single, custom-painted control.
 
-Designed to be genuinely useful and competitive with commercial controls while remaining lightweight, fully open-source (MIT), and easy to consume via NuGet.
+Zero dependencies, a single source file, a fluent API, and first-class support for immutable C# records.
 
-## Key Features
+## Features
 
-- **Virtual Mode** — Handle 50,000 – 500,000+ nodes efficiently with on-demand data loading.
-- **Custom Cell Editors** — Built-in support for TextBox, ComboBox, DateTimePicker, CheckBox, NumericUpDown. Register per-column or per-type custom editors easily.
-- **Tri-State Hierarchical Checkboxes** — Full support with indeterminate state, automatic propagation, and `GetCheckedItems()` / `SetChecked()`.
-- **Drag & Drop** — Move/reorder nodes or change parents with a visual drop indicator (line or highlight).
-- **Advanced Filtering** — Predicate-based filtering that intelligently preserves parent nodes of matching children.
-- **Multi-Selection** — Ctrl/Shift selection with `SelectedModels` collection.
-- **Async Children Loading** — `SetChildrenGetterAsync` with built-in loading indicators.
-- **Column Sorting** — Click headers to sort (ascending/descending/none) with stable ordering and ▲/▼ indicators.
-- **Theming & Appearance** — Built-in dark mode (`UseDarkMode`) plus full color customization.
-- **Immutable-Friendly** — Excellent support for C# records via `ReplaceModel()` and `RefreshObject()`.
-- **Fluent API** — Clean, chainable configuration: `AddColumn(...).SetChildrenGetter(...).SetCellValueSetter(...)`.
-- **High-Performance Rendering** — Custom-painted, double-buffered, low-allocation visible row management.
-- **Rich In-Place Editing** — Keyboard-friendly (F2, Enter, Tab, arrows), type-aware default editors, validation support.
+- **Hybrid tree + columns** — hierarchical rows with any number of typed, formatted columns.
+- **Lazy loading** — children are queried on demand via `SetChildrenGetter`; combine with `SetHasChildrenGetter` to browse very large data sets (100,000+ nodes) without materializing them up front.
+- **Rich in-place editing** — type-aware default editors (TextBox, DateTimePicker for `DateTime`, CheckBox for `bool`), per-column custom editors, edit validation, and full keyboard flow (F2/Enter, Tab/Shift+Tab, Esc).
+- **Immutable-friendly** — designed for records: commit edits with `model with { … }` + `ReplaceModel()`, which preserves expansion, children, and selection.
+- **Column sorting** — click a header to cycle ascending → descending → none, with stable per-sibling-group ordering and ▲/▼ indicators; also available programmatically via `Sort()` / `ClearSort()`.
+- **Filtering** — predicate-based `SetFilter()` keeps ancestors of matches visible and auto-expands them.
+- **Multi-selection** — Ctrl/Shift click, Shift+arrows, Ctrl+A, exposed through `SelectedModels`.
+- **Checkboxes** — `ShowCheckBoxes` with mouse + Space-key toggling, `SetChecked()`, `CheckedModels`, and a `CheckedChanged` event.
+- **Per-node icons** — supply 16×16 images with `SetIconGetter`.
+- **Theming** — `TreeListTheme.Light` / `TreeListTheme.Dark` presets via `ApplyTheme()`, plus every color individually settable.
+- **Polished UX** — tree connector lines, hover highlighting, alternating row shading, optional grid lines, tooltips for truncated cells, type-ahead search, column resize with double-click auto-fit, `AutoFillLastColumn`.
+- **Fast** — custom-painted and double-buffered; only visible rows are realized and drawn.
+
+## Requirements
+
+- Windows
+- .NET 8.0 or .NET 9.0 (`net8.0-windows` / `net9.0-windows`) with Windows Forms
 
 ## Installation
 
@@ -30,7 +34,7 @@ Designed to be genuinely useful and competitive with commercial controls while r
 dotnet add package ModernTreeListView
 ```
 
-Or via Package Manager Console:
+Or via the Package Manager Console:
 
 ```powershell
 Install-Package ModernTreeListView
@@ -41,88 +45,182 @@ Install-Package ModernTreeListView
 ```csharp
 using ModernTreeListView;
 
-var treeList = new ModernTreeListView<MyDataItem>
+public record OrgItem(
+    string Name,
+    string? Role = null,
+    int Headcount = 0,
+    DateTime? LastActive = null,
+    List<OrgItem>? Children = null)
+{
+    public List<OrgItem> Children { get; init; } = Children ?? [];
+}
+
+var tree = new ModernTreeListView<OrgItem>
 {
     Dock = DockStyle.Fill,
     RowHeight = 28,
-    ShowAlternatingRows = true
+    ShowTreeLines = true,
+    MultiSelect = true,
+    AutoFillLastColumn = true
 };
 
-// Fluent column definition
-treeList
-    .AddColumn("Name", x => x.Name, width: 280)
-    .AddColumn("Date", x => x.Created, width: 120, c =>
+// Columns (fluent, with formatters and alignment)
+tree
+    .AddColumn("Name", m => m.Name, width: 280)
+    .AddColumn("Role", m => m.Role, width: 180)
+    .AddColumn("Headcount", m => m.Headcount, width: 100, c =>
     {
-        c.Formatter = v => v is DateTime dt ? dt.ToShortDateString() : "";
         c.Alignment = HorizontalAlignment.Right;
+        c.Formatter = v => v is int i ? i.ToString("N0") : "";
     })
-    .AddColumn("Status", x => x.Status, width: 100);
-
-// Data binding
-treeList
-    .SetRoots(rootItems)
-    .SetChildrenGetter(item => item.Children)
-    .SetCellValueSetter((item, column, value) =>
+    .AddColumn("Last Active", m => m.LastActive, width: 140, c =>
     {
-        // Handle edits (works seamlessly with immutable records)
-        if (column.Title == "Name" && value is string newName)
-        {
-            // Create updated record and replace in the control
-            var updated = item with { Name = newName };
-            // ... update your source data ...
-            treeList.ReplaceModel(item, updated);
-        }
+        c.Formatter = v => v is DateTime dt ? dt.ToString("yyyy-MM-dd HH:mm") : "";
     });
 
-// Enable advanced features
-treeList.ShowCheckboxes = true;
-treeList.AllowDragDrop = true;
-treeList.MultiSelect = true;
-treeList.UseDarkMode = true;
+// Data binding — children are loaded lazily, on first expand
+tree
+    .SetRoots(rootItems)
+    .SetChildrenGetter(m => m.Children)
+    .SetHasChildrenGetter(m => m.Children.Count > 0)
+    .SetCellValueSetter((model, column, value) =>
+    {
+        // Immutable record pattern: build the updated instance and swap it in.
+        if (column.Title == "Name" && value is string name && name.Length > 0)
+        {
+            var updated = model with { Name = name };
+            // ...update your own source collection too, then:
+            tree.ReplaceModel(model, updated); // keeps expansion + selection
+        }
+    });
 ```
 
-## Advanced Usage
+## Going Further
 
-- **Virtual Mode**: See `SetVirtualMode()`, `SetVirtualRootGetter()`, `SetVirtualChildGetter()`, etc.
-- **Custom Editors**: Use `SetColumnEditor(columnIndex, factory)` to provide ComboBox, DateTimePicker, or any custom Control.
-- **Checkboxes**: `GetCheckedItems()`, `SetChecked()`, `NodeCheckStateChanged` event with full tri-state support.
-- **Drag & Drop**: Handle `ItemDrag`, `DragOverNode`, and `DragDropNode` events.
-- **Filtering**: `SetFilter(predicate)` or the convenience `SetFilterText(text)`.
-- **Async Loading**: `SetChildrenGetterAsync(async item => await GetChildrenAsync(item))`.
+### Custom cell editors
 
-Full demonstrations of all features are available in the `samples/ModernTreeListView.Demo` project.
+Each column can supply its own editor and value extractor:
+
+```csharp
+tree.AddColumn("Type", m => m.Type, width: 110, c =>
+{
+    c.EditorFactory = (model, value) =>
+    {
+        var cmb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+        cmb.Items.AddRange(["Department", "Team", "Person"]);
+        cmb.SelectedItem = value as string;
+        return cmb;
+    };
+    c.EditorValueExtractor = editor => ((ComboBox)editor).SelectedItem;
+});
+```
+
+Validate (or veto) edits before they are applied:
+
+```csharp
+tree.CellEditCommitted += (_, e) =>
+{
+    if (e.Column.Title == "Name" && string.IsNullOrWhiteSpace(e.ProposedValue?.ToString()))
+        e.Cancel = true;
+};
+```
+
+### Filtering and sorting
+
+```csharp
+tree.SetFilter(m => m.Name.Contains(query, StringComparison.OrdinalIgnoreCase));
+tree.ClearFilter();
+
+tree.Sort(columnIndex: 2, SortOrder.Descending);
+tree.ClearSort();
+```
+
+### Theming
+
+```csharp
+tree.ApplyTheme(TreeListTheme.Dark);   // or TreeListTheme.Light
+
+// Fine-tune any color afterwards:
+tree.SelectionBackColor = Color.FromArgb(0, 120, 212);
+```
+
+### Large data sets
+
+For data too big to materialize, generate children on demand:
+
+```csharp
+tree
+    .SetChildrenGetter(parent => QueryChildren(parent))      // called on first expand
+    .SetHasChildrenGetter(parent => parent.MayHaveChildren); // avoids enumerating just to draw expanders
+```
+
+### Events
+
+| Event | Raised when |
+| --- | --- |
+| `SelectionChanged` | The selection or focused row changes |
+| `NodeExpanded` / `NodeCollapsed` | A node is expanded or collapsed |
+| `CellEditCommitted` / `CellEditCanceled` | An in-place edit is committed (cancellable) or canceled |
+| `ColumnSortChanged` | The sort column or direction changes |
+| `CheckedChanged` | A node's checked state changes |
+
+### Keyboard reference
+
+| Key | Action |
+| --- | --- |
+| ↑ ↓ PgUp PgDn Home End | Navigate (hold Shift to extend the selection) |
+| ← / → | Collapse / expand, or move to parent / first child |
+| `+` / `-` / `*` | Expand / collapse node, expand whole subtree |
+| F2 or Enter | Edit the current cell |
+| Tab / Shift+Tab | Commit and edit the next / previous editable cell |
+| Esc | Cancel the edit |
+| Space | Toggle checkboxes for all selected rows |
+| Ctrl+A | Select all rows |
+| Any letter/digit | Type-ahead search in the first column |
+
+## Demo Application
+
+A complete sample exercising every feature (lazy 105,000-node data set, custom editors, themes, filtering, checkboxes, icons, and more) lives in [`samples/ModernTreeListView.Demo`](samples/ModernTreeListView.Demo):
+
+```bash
+dotnet run --project samples/ModernTreeListView.Demo
+```
 
 ## Project Structure
-
-This repository uses a professional, NuGet-ready layout:
 
 ```
 ModernTreeListView/
 ├── src/
-│   └── ModernTreeListView/                 # The NuGet library (multi-target net8/net9)
+│   └── ModernTreeListView/          # The library (multi-targets net8.0-windows / net9.0-windows)
 ├── samples/
-│   └── ModernTreeListView.Demo/            # WinForms sample application
-├── .editorconfig
-├── .gitignore
+│   └── ModernTreeListView.Demo/     # WinForms demo application
+├── .github/workflows/               # CI: NuGet publishing on version tags
+├── Directory.Build.props
+├── ModernTreeListView.slnx
 ├── LICENSE
-├── README.md
-└── ModernTreeListView.sln
+└── README.md
 ```
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes (keep the fluent API and performance focus)
-4. Ensure `dotnet build` succeeds cleanly
-5. Open a Pull Request
+Contributions are welcome!
 
-Bug reports and feature requests are welcome via GitHub Issues.
+1. Fork the repository and create a feature branch.
+2. Make your changes — keep the fluent API style, zero-dependency policy, and rendering performance in mind.
+3. Ensure `dotnet build` succeeds without warnings and the demo app runs.
+4. Open a pull request describing the motivation and the change.
+
+Bug reports and feature requests are welcome via [GitHub Issues](https://github.com/kushanp/ModernTreeListView/issues).
+
+## Releasing (maintainers)
+
+Pushing a tag matching `v*.*.*` (e.g. `v1.2.3`) triggers the `publish-nuget.yml` workflow, which builds in Release mode, packs the `.nupkg` and `.snupkg`, and publishes to [NuGet.org](https://www.nuget.org/packages/ModernTreeListView). The workflow authenticates with the `NUGET_API_KEY` repository secret.
+
+```bash
+git tag v1.2.3
+git push origin main --tags
+```
 
 ## License
 
 Licensed under the [MIT License](LICENSE).
-
-## Acknowledgments
-
-Built to provide a high-quality, open-source alternative for complex hierarchical data scenarios in WinForms applications. Feedback and contributions from the community help make it better.

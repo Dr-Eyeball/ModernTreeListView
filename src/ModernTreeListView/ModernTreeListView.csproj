@@ -13,7 +13,8 @@
 
     <!-- NuGet Packaging -->
     <PackageId>ModernTreeListView</PackageId>
-    <Version>1.0.0</Version>
+    <!-- Version is managed by CI (GitHub tag) or set here for local builds -->
+    <Version>0.0.0</Version>
     <Authors>ModernTreeListView Contributors</Authors>
     <Company>ModernTreeListView</Company>
     <Description>
@@ -32,6 +33,8 @@
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <!-- Ensure deterministic builds and proper packing behavior -->
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
   <ItemGroup>
