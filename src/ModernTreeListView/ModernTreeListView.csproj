@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!-- Multi-target .NET 8 and .NET 9 for Windows Forms -->
-    <TargetFrameworks>net8.0-windows;net9.0-windows</TargetFrameworks>
+    <TargetFrameworks>net8.0-windows;net9.0-windows;net10.0-windows</TargetFrameworks>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
