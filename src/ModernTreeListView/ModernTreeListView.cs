@@ -2696,9 +2696,11 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         if (_vScrollBar.Visible)
         {
             CancelEdit();
-            int newVal = _vOffset - (e.Delta / 2); // natural feel
+            // Scroll by whole rows so the first row always lines up under the header: a partial-row offset
+            // would leave it overlapping the header, cycling as the wheel turns.
+            int rows = Math.Max(1, Math.Abs(e.Delta / 2) / Math.Max(1, _rowHeight));
             int maxVal = Math.Max(0, (_visibleRows.Count * _rowHeight) - Math.Max(1, ClientSize.Height - HeaderTotal));
-            _vOffset = Math.Clamp(newVal, 0, maxVal);
+            _vOffset = Math.Clamp(_vOffset - Math.Sign(e.Delta) * rows * _rowHeight, 0, maxVal);
 
             if (_vScrollBar.Visible)
             {
