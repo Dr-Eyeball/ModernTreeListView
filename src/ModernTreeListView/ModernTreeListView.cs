@@ -335,7 +335,6 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
             true);
 
         DoubleBuffered = true;
-        Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
 
         TabStop = true;
 
