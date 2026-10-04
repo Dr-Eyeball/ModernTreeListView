@@ -2513,7 +2513,9 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
             int filterColRight = GetColumnStartX(hit.ColumnIndex) + GetColumnWidth(hit.ColumnIndex);
             bool isSortedCol = (_sortColumnIndex == hit.ColumnIndex && _sortOrder != SortOrder.None);
             int glyphLeft = filterColRight - (isSortedCol ? 30 : 16);
-            if (e.X >= glyphLeft && e.X <= filterColRight)
+            // Leave the resize grip (the last ResizeGripWidth pixels before the column divider) alone, so a
+            // click on the divider resizes instead of opening the filter menu.
+            if (e.X >= glyphLeft && e.X < filterColRight - ResizeGripWidth)
             {
                 HeaderFilterRequested?.Invoke(this, new HeaderFilterRequestedEventArgs<TModel>(
                     hit.ColumnIndex, _columns[hit.ColumnIndex], PointToScreen(e.Location)));
