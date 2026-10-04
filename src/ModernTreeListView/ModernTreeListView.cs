@@ -39,6 +39,13 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
     private Action<TModel, TreeListColumn<TModel>, object?>? _setCellValue;
     private Func<TModel, Image?>? _iconGetter;
 
+    // Grouped column headers (optional bands drawn above the column header row).
+    private readonly List<HeaderGroup> _headerGroups = [];
+    private int _groupHeaderHeight;
+
+    // Columns that currently have an active filter (a funnel glyph is drawn on their header).
+    private readonly HashSet<int> _filteredColumns = [];
+
     // Selection state (multi-select aware; _selectedNode is the focused node)
     private readonly HashSet<TreeNode> _selectedNodes = [];
     private TreeNode? _selectedNode;
@@ -252,6 +259,58 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
     /// </summary>
     public event EventHandler<TreeNodeEventArgs<TModel>>? CheckedChanged;
 
+    /// <summary>
+    /// Raised when the user right-clicks a column header, so a host can show a filter / column menu for
+    /// that column. Carries the column index, the column itself, and a screen point to open the menu at.
+    /// </summary>
+    public event EventHandler<HeaderFilterRequestedEventArgs<TModel>>? HeaderFilterRequested;
+
+    /// <summary>
+    /// Height (pixels) of the optional grouped-header band drawn above the column header row. 0 hides it.
+    /// </summary>
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public int GroupHeaderHeight
+    {
+        get => _groupHeaderHeight;
+        set
+        {
+            if (value < 0) value = 0;
+            if (_groupHeaderHeight == value) return;
+            _groupHeaderHeight = value;
+            UpdateScrollbars();
+            Invalidate();
+        }
+    }
+
+    /// <summary>The grouped-header bands currently registered (see <see cref="AddHeaderGroup"/>).</summary>
+    public IReadOnlyList<HeaderGroup> HeaderGroups => _headerGroups;
+
+    /// <summary>
+    /// Adds a grouped parent header spanning <paramref name="columnCount"/> columns starting at
+    /// <paramref name="startColumn"/> (0-based). The caption is drawn centred across the span whenever
+    /// <see cref="GroupHeaderHeight"/> is greater than zero.
+    /// </summary>
+    public ModernTreeListView<TModel> AddHeaderGroup(string caption, int startColumn, int columnCount)
+    {
+        if (columnCount <= 0) return this;
+        _headerGroups.Add(new HeaderGroup(caption, startColumn, columnCount));
+        Invalidate();
+        return this;
+    }
+
+    /// <summary>
+    /// Marks / clears a column as filtered, so a small funnel glyph is drawn on its header (next to any
+    /// sort glyph). Purely visual - the filter itself is applied with <see cref="SetFilter"/>.
+    /// </summary>
+    public void SetColumnFiltered(int columnIndex, bool filtered)
+    {
+        if (columnIndex < 0 || columnIndex >= _columns.Count) return;
+        if (filtered) _filteredColumns.Add(columnIndex);
+        else _filteredColumns.Remove(columnIndex);
+        Invalidate();
+    }
+
     public ModernTreeListView()
     {
         SetStyle(
@@ -294,6 +353,9 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         _vScrollBar.Scroll += OnVScroll;
         _hScrollBar.Scroll += OnHScroll;
     }
+
+    /// <summary>Total header height: the grouped band (if any) plus the column-header row.</summary>
+    private int HeaderTotal => _groupHeaderHeight + _headerHeight;
 
     private void OnVScroll(object? sender, ScrollEventArgs e)
     {
@@ -873,7 +935,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
         int clientWidth = ClientSize.Width;
         int clientHeight = ClientSize.Height;
-        int header = _headerHeight;
+        int header = HeaderTotal;
         int viewHeight = Math.Max(0, clientHeight - header);
 
         // Vertical
@@ -935,7 +997,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         int rowTop = rowIndex * _rowHeight;
         int rowBottom = rowTop + _rowHeight;
         int viewTop = _vOffset;
-        int viewHeight = Math.Max(0, ClientSize.Height - _headerHeight);
+        int viewHeight = Math.Max(0, ClientSize.Height - HeaderTotal);
         int viewBottom = viewTop + viewHeight;
 
         if (rowTop < viewTop)
@@ -971,7 +1033,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
     {
         if (y < 0) return default;
 
-        if (y < _headerHeight)
+        if (y < HeaderTotal)
         {
             // Header
             int colX = -_hOffset;
@@ -988,7 +1050,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         }
 
         int firstRow = _vOffset / _rowHeight;
-        int rowIndex = firstRow + (y - _headerHeight + (_vOffset % _rowHeight)) / _rowHeight;
+        int rowIndex = firstRow + (y - HeaderTotal + (_vOffset % _rowHeight)) / _rowHeight;
 
         if (rowIndex < 0 || rowIndex >= _visibleRows.Count)
             return default;
@@ -1009,7 +1071,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
                 colIndex = c;
                 if (c == 0)
                 {
-                    int rowTop = _headerHeight + (rowIndex * _rowHeight) - _vOffset;
+                    int rowTop = HeaderTotal + (rowIndex * _rowHeight) - _vOffset;
                     var cellRect = new Rectangle(cellX, rowTop, w, _rowHeight);
                     var layout = GetTreeCellLayout(vrow, cellRect);
 
@@ -1742,7 +1804,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
     private void InvalidateRow(int rowIndex)
     {
         if (rowIndex < 0) return;
-        int y = _headerHeight + (rowIndex * _rowHeight) - _vOffset;
+        int y = HeaderTotal + (rowIndex * _rowHeight) - _vOffset;
         Invalidate(new Rectangle(0, y, ClientSize.Width, _rowHeight));
     }
 
@@ -1759,7 +1821,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
         int colWidth = GetColumnWidth(columnIndex);
 
-        int rowY = _headerHeight + (rowIndex * _rowHeight) - _vOffset;
+        int rowY = HeaderTotal + (rowIndex * _rowHeight) - _vOffset;
 
         return new Rectangle(colX, rowY, colWidth, _rowHeight);
     }
@@ -1879,7 +1941,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
         // 3. Borders / finishing
         using var borderPen = new Pen(GridLineColor);
-        g.DrawLine(borderPen, 0, _headerHeight - 1, width, _headerHeight - 1);
+        g.DrawLine(borderPen, 0, HeaderTotal - 1, width, HeaderTotal - 1);
 
         // Focus cue on whole control when focused (subtle)
         if (Focused && _selectedIndex >= 0)
@@ -1891,12 +1953,25 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
     private void DrawHeader(Graphics g, int clientWidth)
     {
-        var headerRect = new Rectangle(0, 0, clientWidth, _headerHeight);
-
         using var headerBrush = new SolidBrush(HeaderBackColor);
-        g.FillRectangle(headerBrush, headerRect);
-
         using var linePen = new Pen(GridLineColor);
+
+        // Optional grouped-header band above the column header row.
+        if (_groupHeaderHeight > 0 && _headerGroups.Count > 0)
+        {
+            using var groupBrush = new SolidBrush(Color.FromArgb(
+                Math.Max(0, HeaderBackColor.R - 14),
+                Math.Max(0, HeaderBackColor.G - 14),
+                Math.Max(0, HeaderBackColor.B - 14)));
+            g.FillRectangle(groupBrush, 0, 0, clientWidth, _groupHeaderHeight);
+
+            foreach (var group in _headerGroups)
+                DrawHeaderGroup(g, group, clientWidth, linePen);
+        }
+
+        int headerTop = _groupHeaderHeight;
+        var headerRect = new Rectangle(0, headerTop, clientWidth, _headerHeight);
+        g.FillRectangle(headerBrush, headerRect);
 
         int x = -_hOffset;
 
@@ -1904,20 +1979,21 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         {
             var col = _columns[c];
             int colWidth = GetColumnWidth(c);
-            var colRect = new Rectangle(x, 0, colWidth, _headerHeight);
+            var colRect = new Rectangle(x, headerTop, colWidth, _headerHeight);
 
             if (colRect.Right > 0 && colRect.Left < clientWidth)
             {
                 // Column separator (subtle)
-                g.DrawLine(linePen, colRect.Right - 1, 4, colRect.Right - 1, _headerHeight - 5);
+                g.DrawLine(linePen, colRect.Right - 1, headerTop + 4, colRect.Right - 1, headerTop + _headerHeight - 5);
 
-                // Title + optional sort indicator
+                // Title + optional sort / filter indicators
                 bool isSortedCol = (_sortColumnIndex == c && _sortOrder != SortOrder.None);
+                bool isFiltered = _filteredColumns.Contains(c);
                 string sortGlyph = isSortedCol
                     ? (_sortOrder == SortOrder.Ascending ? "▲" : "▼")
                     : "";
 
-                int textRightPadding = isSortedCol ? 18 : CellPadding;
+                int textRightPadding = (isSortedCol || isFiltered) ? 18 : CellPadding;
                 var textRect = new Rectangle(
                     colRect.Left + CellPadding,
                     colRect.Top,
@@ -1931,6 +2007,24 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
                     textRect,
                     HeaderForeColor,
                     TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.PreserveGraphicsClipping);
+
+                if (isFiltered)
+                {
+                    // Funnel glyph, left of the sort glyph, marking a column with an active filter.
+                    var filterGlyphRect = new Rectangle(
+                        colRect.Right - (isSortedCol ? 30 : 16),
+                        colRect.Top,
+                        14,
+                        colRect.Height);
+
+                    TextRenderer.DrawText(
+                        g,
+                        "▾",
+                        Font,
+                        filterGlyphRect,
+                        HeaderForeColor,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.PreserveGraphicsClipping);
+                }
 
                 if (isSortedCol)
                 {
@@ -1955,7 +2049,38 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         }
 
         // Right edge line if needed
-        g.DrawLine(linePen, 0, _headerHeight - 1, clientWidth, _headerHeight - 1);
+        g.DrawLine(linePen, 0, headerTop + _headerHeight - 1, clientWidth, headerTop + _headerHeight - 1);
+    }
+
+    /// <summary>Draws one grouped-header band's caption, centred across the columns it spans.</summary>
+    private void DrawHeaderGroup(Graphics g, HeaderGroup group, int clientWidth, Pen linePen)
+    {
+        int startColumn = Math.Max(0, group.StartColumn);
+        int endColumn = Math.Min(_columns.Count, startColumn + group.ColumnCount);
+        if (endColumn <= startColumn)
+            return;
+
+        int left = GetColumnStartX(startColumn);
+        int right = left;
+        for (int c = startColumn; c < endColumn; c++)
+            right += GetColumnWidth(c);
+
+        // Nothing to draw while the band is scrolled out of view.
+        if (right < 0 || left >= clientWidth)
+            return;
+
+        using var captionFont = new Font(Font, FontStyle.Bold);
+        var bandRect = new Rectangle(left, 0, right - left, _groupHeaderHeight);
+        TextRenderer.DrawText(
+            g,
+            group.Caption,
+            captionFont,
+            bandRect,
+            HeaderForeColor,
+            TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.PreserveGraphicsClipping);
+
+        // Boundary line at the group's right edge.
+        g.DrawLine(linePen, right - 1, 0, right - 1, _groupHeaderHeight);
     }
 
     private void DrawRows(Graphics g, int clientWidth, int clientHeight)
@@ -1963,7 +2088,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         if (_visibleRows.Count == 0) return;
 
         int firstRow = Math.Max(0, _vOffset / _rowHeight);
-        int rowPixelY = _headerHeight - (_vOffset % _rowHeight);
+        int rowPixelY = HeaderTotal - (_vOffset % _rowHeight);
 
         using var gridPen = new Pen(GridLineColor);
 
@@ -2049,9 +2174,18 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
             g.DrawImage(layout.Icon, layout.IconRect);
         }
 
+        // Optional per-cell background (a flagged cell keeps its colour while selected).
+        Color? cellBack = column.BackColor?.Invoke(node.Model);
+        if (cellBack.HasValue)
+        {
+            using var b = new SolidBrush(cellBack.Value);
+            g.FillRectangle(b, cellRect);
+        }
+
         // Text
         string text = GetDisplayText(node.Model, column);
-        var textColor = isSelected ? SelectionForeColor : ForeColor;
+        var textColor = column.ForeColor?.Invoke(node.Model)
+            ?? (isSelected ? SelectionForeColor : ForeColor);
 
         var textRect = new Rectangle(
             layout.ContentLeft,
@@ -2101,8 +2235,19 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
     private void DrawDataCell(Graphics g, Rectangle cellRect, VisibleRow vrow, TreeListColumn<TModel> column, bool isSelected)
     {
-        string text = GetDisplayText(vrow.Node.Model, column);
-        var textColor = isSelected ? SelectionForeColor : ForeColor;
+        TModel model = vrow.Node.Model;
+
+        // Optional per-cell background (a flagged / bookmarked cell keeps its colour while selected).
+        Color? cellBack = column.BackColor?.Invoke(model);
+        if (cellBack.HasValue)
+        {
+            using var b = new SolidBrush(cellBack.Value);
+            g.FillRectangle(b, cellRect);
+        }
+
+        string text = GetDisplayText(model, column);
+        var textColor = column.ForeColor?.Invoke(model)
+            ?? (isSelected ? SelectionForeColor : ForeColor);
 
         // Respect column alignment (simple mapping)
         var flags = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.PreserveGraphicsClipping;
@@ -2113,10 +2258,20 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         else
             flags |= TextFormatFlags.Left;
 
+        // Optional per-cell icon (e.g. a boolean tick / cross), drawn before the text.
+        Image? icon = column.Icon?.Invoke(model);
+        int textLeft = cellRect.Left + CellPadding;
+        if (icon != null)
+        {
+            var iconRect = new Rectangle(textLeft, cellRect.Top + (cellRect.Height - IconSize) / 2, IconSize, IconSize);
+            g.DrawImage(icon, iconRect);
+            textLeft += IconSize + 4;
+        }
+
         var textRect = new Rectangle(
-            cellRect.Left + CellPadding,
+            textLeft,
             cellRect.Top,
-            Math.Max(4, cellRect.Width - CellPadding * 2),
+            Math.Max(4, cellRect.Right - textLeft - CellPadding),
             cellRect.Height);
 
         TextRenderer.DrawText(g, text, Font, textRect, textColor, flags);
@@ -2245,7 +2400,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
     {
         base.OnMouseDoubleClick(e);
 
-        if (e.Y >= 0 && e.Y < _headerHeight)
+        if (e.Y >= 0 && e.Y < HeaderTotal)
         {
             // Double-click on a column divider auto-fits that column
             int x = -_hOffset;
@@ -2273,7 +2428,17 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
     private void HandleHeaderMouseDown(MouseEventArgs e, HitTestResult hit)
     {
-        if (e.Button != MouseButtons.Left || hit.ColumnIndex < 0) return;
+        if (hit.ColumnIndex < 0) return;
+
+        if (e.Button == MouseButtons.Right)
+        {
+            // Right-click on a column header: let the host show a filter / column menu for that column.
+            HeaderFilterRequested?.Invoke(this, new HeaderFilterRequestedEventArgs<TModel>(
+                hit.ColumnIndex, _columns[hit.ColumnIndex], PointToScreen(e.Location)));
+            return;
+        }
+
+        if (e.Button != MouseButtons.Left) return;
 
         // Check for column resize grip
         int colRight = GetColumnStartX(hit.ColumnIndex) + GetColumnWidth(hit.ColumnIndex);
@@ -2332,7 +2497,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         }
 
         // Update cursor for resize affordance in header
-        if (e.Y < _headerHeight)
+        if (e.Y < HeaderTotal)
         {
             SetHoverRow(-1);
             UpdateToolTip(default);
@@ -2449,7 +2614,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         {
             CancelEdit();
             int newVal = _vOffset - (e.Delta / 2); // natural feel
-            int maxVal = Math.Max(0, (_visibleRows.Count * _rowHeight) - Math.Max(1, ClientSize.Height - _headerHeight));
+            int maxVal = Math.Max(0, (_visibleRows.Count * _rowHeight) - Math.Max(1, ClientSize.Height - HeaderTotal));
             _vOffset = Math.Clamp(newVal, 0, maxVal);
 
             if (_vScrollBar.Visible)
@@ -2565,7 +2730,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
             case Keys.PageUp:
                 {
-                    int page = Math.Max(1, (ClientSize.Height - _headerHeight) / _rowHeight);
+                    int page = Math.Max(1, (ClientSize.Height - HeaderTotal) / _rowHeight);
                     int newIdx = Math.Max(0, _selectedIndex - page);
                     MoveFocusTo(newIdx, e.Shift);
                     e.Handled = true;
@@ -2574,7 +2739,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
             case Keys.PageDown:
                 {
-                    int page = Math.Max(1, (ClientSize.Height - _headerHeight) / _rowHeight);
+                    int page = Math.Max(1, (ClientSize.Height - HeaderTotal) / _rowHeight);
                     int newIdx = Math.Min(_visibleRows.Count - 1, _selectedIndex + page);
                     MoveFocusTo(newIdx, e.Shift);
                     e.Handled = true;
@@ -2815,6 +2980,53 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 }
 
 /// <summary>
+/// A grouped parent header spanning one or more columns, drawn above the column header row by
+/// <see cref="ModernTreeListView{TModel}.AddHeaderGroup"/>.
+/// </summary>
+public sealed class HeaderGroup
+{
+    /// <summary>Creates a grouped header band.</summary>
+    public HeaderGroup(string caption, int startColumn, int columnCount)
+    {
+        Caption = caption;
+        StartColumn = startColumn;
+        ColumnCount = columnCount;
+    }
+
+    /// <summary>The caption drawn centred across the spanned columns.</summary>
+    public string Caption { get; set; }
+
+    /// <summary>The first (0-based) column the band covers.</summary>
+    public int StartColumn { get; set; }
+
+    /// <summary>How many columns the band covers.</summary>
+    public int ColumnCount { get; set; }
+}
+
+/// <summary>
+/// Event arguments for <see cref="ModernTreeListView{TModel}.HeaderFilterRequested"/>: the column whose
+/// header was right-clicked, and the screen point a context menu should be shown at.
+/// </summary>
+public sealed class HeaderFilterRequestedEventArgs<TModel> : EventArgs
+{
+    public HeaderFilterRequestedEventArgs(int columnIndex, TreeListColumn<TModel> column, Point location)
+    {
+        ColumnIndex = columnIndex;
+        Column = column;
+        Location = location;
+    }
+
+    /// <summary>The 0-based index of the column.</summary>
+    public int ColumnIndex { get; }
+
+    /// <summary>The column whose header was right-clicked.</summary>
+    public TreeListColumn<TModel> Column { get; }
+
+    /// <summary>The screen point a context menu should open at.</summary>
+    public Point Location { get; }
+}
+
+/// <summary>
 /// Defines a column in the ModernTreeListView.
 /// </summary>
 public sealed class TreeListColumn<TModel>
@@ -2847,6 +3059,23 @@ public sealed class TreeListColumn<TModel>
     /// When null, built-in extraction is used (TextBox.Text, CheckBox.Checked, DateTimePicker.Value, ...).
     /// </summary>
     public Func<Control, object?>? EditorValueExtractor { get; set; }
+
+    /// <summary>
+    /// Optional per-cell foreground colour. Return null to use the theme's normal / selection colour.
+    /// </summary>
+    public Func<TModel, Color?>? ForeColor { get; set; }
+
+    /// <summary>
+    /// Optional per-cell background colour, drawn over the row background (used to flag a cell; it is kept
+    /// while the row is selected). Return null to leave the row background alone.
+    /// </summary>
+    public Func<TModel, Color?>? BackColor { get; set; }
+
+    /// <summary>
+    /// Optional per-cell 16x16 icon drawn before the cell text (e.g. a boolean tick / cross). Return null
+    /// for no icon. The control does not take ownership of the images.
+    /// </summary>
+    public Func<TModel, Image?>? Icon { get; set; }
 
     internal TreeListColumn(string title, Func<TModel, object?> getter, int width)
     {
