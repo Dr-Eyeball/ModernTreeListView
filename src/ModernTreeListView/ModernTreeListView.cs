@@ -45,6 +45,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
     // Columns that currently have an active filter (a funnel glyph is drawn on their header).
     private readonly HashSet<int> _filteredColumns = [];
+    private readonly HashSet<int> _filterableColumns = [];
 
     // Selection state (multi-select aware; _selectedNode is the focused node)
     private readonly HashSet<TreeNode> _selectedNodes = [];
@@ -308,6 +309,18 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         if (columnIndex < 0 || columnIndex >= _columns.Count) return;
         if (filtered) _filteredColumns.Add(columnIndex);
         else _filteredColumns.Remove(columnIndex);
+        Invalidate();
+    }
+
+    /// <summary>
+    /// Marks a column as having a filter menu, so a dropdown glyph is drawn on its header. Clicking the
+    /// glyph (left or right button) raises <see cref="HeaderFilterRequested"/> instead of sorting.
+    /// </summary>
+    public void SetColumnFilterable(int columnIndex, bool filterable)
+    {
+        if (columnIndex < 0 || columnIndex >= _columns.Count) return;
+        if (filterable) _filterableColumns.Add(columnIndex);
+        else _filterableColumns.Remove(columnIndex);
         Invalidate();
     }
 
@@ -1988,12 +2001,13 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
                 // Title + optional sort / filter indicators
                 bool isSortedCol = (_sortColumnIndex == c && _sortOrder != SortOrder.None);
-                bool isFiltered = _filteredColumns.Contains(c);
+                bool isFilterable = _filterableColumns.Contains(c);
+                bool isFiltered = isFilterable && _filteredColumns.Contains(c);
                 string sortGlyph = isSortedCol
                     ? (_sortOrder == SortOrder.Ascending ? "▲" : "▼")
                     : "";
 
-                int textRightPadding = (isSortedCol || isFiltered) ? 18 : CellPadding;
+                int textRightPadding = (isSortedCol || isFilterable) ? 18 : CellPadding;
                 var textRect = new Rectangle(
                     colRect.Left + CellPadding,
                     colRect.Top,
@@ -2008,21 +2022,28 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
                     HeaderForeColor,
                     TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis | TextFormatFlags.PreserveGraphicsClipping);
 
-                if (isFiltered)
+                if (isFilterable)
                 {
-                    // Funnel glyph, left of the sort glyph, marking a column with an active filter.
+                    // Dropdown glyph: clicking it opens the column's filter menu. Brighter when filtered.
                     var filterGlyphRect = new Rectangle(
                         colRect.Right - (isSortedCol ? 30 : 16),
                         colRect.Top,
                         14,
                         colRect.Height);
 
+                    Color filterGlyphColor = isFiltered
+                        ? HeaderForeColor
+                        : Color.FromArgb(
+                            Math.Max(0, HeaderForeColor.R - 90),
+                            Math.Max(0, HeaderForeColor.G - 90),
+                            Math.Max(0, HeaderForeColor.B - 90));
+
                     TextRenderer.DrawText(
                         g,
                         "▾",
                         Font,
                         filterGlyphRect,
-                        HeaderForeColor,
+                        filterGlyphColor,
                         TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter | TextFormatFlags.PreserveGraphicsClipping);
                 }
 
@@ -2439,6 +2460,20 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         }
 
         if (e.Button != MouseButtons.Left) return;
+
+        // A left click on a filterable column's dropdown glyph opens its filter menu (not a sort).
+        if (_filterableColumns.Contains(hit.ColumnIndex))
+        {
+            int filterColRight = GetColumnStartX(hit.ColumnIndex) + GetColumnWidth(hit.ColumnIndex);
+            bool isSortedCol = (_sortColumnIndex == hit.ColumnIndex && _sortOrder != SortOrder.None);
+            int glyphLeft = filterColRight - (isSortedCol ? 30 : 16);
+            if (e.X >= glyphLeft && e.X <= filterColRight)
+            {
+                HeaderFilterRequested?.Invoke(this, new HeaderFilterRequestedEventArgs<TModel>(
+                    hit.ColumnIndex, _columns[hit.ColumnIndex], PointToScreen(e.Location)));
+                return;
+            }
+        }
 
         // Check for column resize grip
         int colRight = GetColumnStartX(hit.ColumnIndex) + GetColumnWidth(hit.ColumnIndex);
