@@ -140,6 +140,10 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Color GroupEdgeColor { get; set; } = Color.White;
+
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public Color ExpanderColor { get; set; }
 
     [Browsable(false)]
@@ -1951,6 +1955,9 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         // 2. Rows
         DrawRows(g, width, height);
 
+        // 2.5 Group edge dividers (vertical lines separating the grouped sections).
+        DrawGroupEdges(g, width, height);
+
         // 3. Borders / finishing
         using var borderPen = new Pen(GridLineColor);
         g.DrawLine(borderPen, 0, HeaderTotal - 1, width, HeaderTotal - 1);
@@ -2101,6 +2108,46 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
         // Boundary line at the group's right edge.
         g.DrawLine(linePen, right - 1, 0, right - 1, _groupHeaderHeight);
+    }
+
+    /// <summary>
+    /// Draws the vertical dividers that separate the grouped-header sections: one line down each group's
+    /// left and right edge, running from the top of the header to the bottom of the data area (the parent
+    /// band, the column headers and every row), so a group's boundaries are easy to pick out. An edge that
+    /// is scrolled out of view is skipped, and the lines stop above the horizontal scrollbar.
+    /// </summary>
+    private void DrawGroupEdges(Graphics g, int clientWidth, int clientHeight)
+    {
+        if (_headerGroups.Count == 0 || _groupHeaderHeight <= 0)
+            return;
+
+        int bottom = clientHeight - (_hScrollBar.Visible ? _hScrollBar.Height : 0);
+        if (bottom <= 0)
+            return;
+
+        using var edgePen = new Pen(GroupEdgeColor);
+
+        foreach (var group in _headerGroups)
+        {
+            int startColumn = Math.Max(0, group.StartColumn);
+            int endColumn = Math.Min(_columns.Count, startColumn + group.ColumnCount);
+            if (endColumn <= startColumn)
+                continue;
+
+            int left = GetColumnStartX(startColumn);
+            int right = left;
+            for (int c = startColumn; c < endColumn; c++)
+                right += GetColumnWidth(c);
+
+            // Left edge (only when the group's real left edge is on screen).
+            if (left >= 0 && left < clientWidth)
+                g.DrawLine(edgePen, left, 0, left, bottom);
+
+            // Right edge.
+            int edge = right - 1;
+            if (edge >= 0 && edge < clientWidth)
+                g.DrawLine(edgePen, edge, 0, edge, bottom);
+        }
     }
 
     private void DrawRows(Graphics g, int clientWidth, int clientHeight)
