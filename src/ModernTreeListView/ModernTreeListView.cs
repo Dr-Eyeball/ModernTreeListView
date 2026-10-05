@@ -1398,6 +1398,15 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
     }
 
     /// <summary>
+    /// Whether the node for the given model is expanded.
+    /// </summary>
+    public bool IsExpanded(TModel model)
+    {
+        var node = FindNode(model);
+        return node != null && node.IsExpanded;
+    }
+
+    /// <summary>
     /// Expands every node in the tree, loading children on demand as needed.
     /// Per-node <see cref="NodeExpanded"/> events are not raised for bulk expansion.
     /// </summary>
@@ -2488,6 +2497,15 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         var hit = HitTest(e.X, e.Y);
         if (hit.RowIndex >= 0 && !hit.IsExpander && !hit.IsCheckBox && hit.IsValid)
         {
+            // Double-clicking a parent row (one with children) expands or collapses it; a leaf row has no
+            // children, so there is nothing to expand and the click is left to editing.
+            var vrow = _visibleRows[hit.RowIndex];
+            if (NodeHasChildren(vrow.Node))
+            {
+                ToggleExpand(vrow.Node);
+                return;
+            }
+
             int col = hit.ColumnIndex >= 0 ? hit.ColumnIndex : 0;
             BeginEdit(hit.RowIndex, col);
         }
