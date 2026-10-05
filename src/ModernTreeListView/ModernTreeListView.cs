@@ -2263,9 +2263,10 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
             g.DrawImage(layout.Icon, layout.IconRect);
         }
 
-        // Optional per-cell background (a flagged cell keeps its colour while selected).
+        // Optional per-cell background; while selected, the selection background supersedes it (the
+        // same rule DrawDataCell follows), so the first column highlights with the rest of the row.
         Color? cellBack = column.BackColor?.Invoke(node.Model);
-        if (cellBack.HasValue)
+        if (cellBack.HasValue && !isSelected)
         {
             using var b = new SolidBrush(cellBack.Value);
             g.FillRectangle(b, cellRect);
@@ -2527,6 +2528,11 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
     private void HandleHeaderMouseDown(MouseEventArgs e, HitTestResult hit)
     {
+        // A click on the grouped-header band (above the column headers) is not a column action: it
+        // does nothing, so a click there cannot sort, filter or resize.
+        if (_groupHeaderHeight > 0 && _headerGroups.Count > 0 && e.Y < _groupHeaderHeight)
+            return;
+
         if (hit.ColumnIndex < 0) return;
 
         if (e.Button == MouseButtons.Right)
