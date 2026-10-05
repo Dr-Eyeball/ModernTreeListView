@@ -952,10 +952,17 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         int clientWidth = ClientSize.Width;
         int clientHeight = ClientSize.Height;
         int header = HeaderTotal;
-        int viewHeight = Math.Max(0, clientHeight - header);
+
+        // The horizontal need is decided first so the vertical view height can subtract the
+        // horizontal scrollbar: otherwise the last row would hide behind it when both bars show.
+        // (GetTotalColumnsWidth is independent of the vertical scrollbar here because
+        // AutoFillLastColumn is not in use.)
+        int totalWidth = GetTotalColumnsWidth();
+        bool needH = totalWidth > clientWidth && clientWidth > 0;
 
         // Vertical
         int totalHeight = _visibleRows.Count * _rowHeight;
+        int viewHeight = Math.Max(0, clientHeight - header - (needH ? _hScrollBar.Height : 0));
         bool needV = totalHeight > viewHeight && viewHeight > 0;
 
         _vScrollBar.Visible = needV;
@@ -978,10 +985,6 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         {
             _vOffset = 0;
         }
-
-        // Horizontal (computed after vertical so AutoFillLastColumn accounts for the vertical scrollbar)
-        int totalWidth = GetTotalColumnsWidth();
-        bool needH = totalWidth > clientWidth && clientWidth > 0;
 
         _hScrollBar.Visible = needH;
         if (needH)
@@ -1013,7 +1016,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         int rowTop = rowIndex * _rowHeight;
         int rowBottom = rowTop + _rowHeight;
         int viewTop = _vOffset;
-        int viewHeight = Math.Max(0, ClientSize.Height - HeaderTotal);
+        int viewHeight = Math.Max(0, ClientSize.Height - HeaderTotal - (_hScrollBar.Visible ? _hScrollBar.Height : 0));
         int viewBottom = viewTop + viewHeight;
 
         if (rowTop < viewTop)
@@ -2166,9 +2169,16 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         int firstRow = Math.Max(0, _vOffset / _rowHeight);
         int rowPixelY = HeaderTotal - (_vOffset % _rowHeight);
 
+        // Rows are clipped to the strip between the header and the horizontal scrollbar, so a
+        // partial row at the top cannot overdraw the column titles and the last row cannot run
+        // over the scrollbar.
+        int viewBottom = clientHeight - (_hScrollBar.Visible ? _hScrollBar.Height : 0);
+        Region previousClip = g.Clip;
+        g.SetClip(new Rectangle(0, HeaderTotal, clientWidth, Math.Max(0, viewBottom - HeaderTotal)));
+
         using var gridPen = new Pen(GridLineColor);
 
-        for (int r = firstRow; r < _visibleRows.Count && rowPixelY < clientHeight; r++)
+        for (int r = firstRow; r < _visibleRows.Count && rowPixelY < viewBottom; r++)
         {
             var vrow = _visibleRows[r];
             bool isSelected = _selectedNodes.Contains(vrow.Node);
@@ -2223,6 +2233,9 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
             rowPixelY += _rowHeight;
         }
+
+        g.Clip = previousClip;
+        previousClip.Dispose();
     }
 
     private void DrawTreeCell(Graphics g, Rectangle cellRect, VisibleRow vrow, TreeListColumn<TModel> column, bool isSelected)
@@ -2718,7 +2731,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
             // Scroll by whole rows so the first row always lines up under the header: a partial-row offset
             // would leave it overlapping the header, cycling as the wheel turns.
             int rows = Math.Max(1, Math.Abs(e.Delta / 2) / Math.Max(1, _rowHeight));
-            int maxVal = Math.Max(0, (_visibleRows.Count * _rowHeight) - Math.Max(1, ClientSize.Height - HeaderTotal));
+            int maxVal = Math.Max(0, (_visibleRows.Count * _rowHeight) - Math.Max(1, ClientSize.Height - HeaderTotal - (_hScrollBar.Visible ? _hScrollBar.Height : 0)));
             _vOffset = Math.Clamp(_vOffset - Math.Sign(e.Delta) * rows * _rowHeight, 0, maxVal);
 
             if (_vScrollBar.Visible)
