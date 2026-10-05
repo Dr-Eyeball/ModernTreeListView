@@ -2313,9 +2313,10 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
     {
         TModel model = vrow.Node.Model;
 
-        // Optional per-cell background (a flagged / bookmarked cell keeps its colour while selected).
+        // Optional per-cell background. While selected, the selection background supersedes it - only the
+        // first column (drawn by DrawTreeCell) keeps its own colour while selected.
         Color? cellBack = column.BackColor?.Invoke(model);
-        if (cellBack.HasValue)
+        if (cellBack.HasValue && !isSelected)
         {
             using var b = new SolidBrush(cellBack.Value);
             g.FillRectangle(b, cellRect);
