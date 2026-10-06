@@ -1028,14 +1028,51 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
             _vOffset = rowBottom - viewHeight;
         }
 
-        if (_vScrollBar.Visible)
-        {
-            int maxVal = Math.Max(0, (_visibleRows.Count * _rowHeight) - viewHeight);
-            _vScrollBar.Value = Math.Clamp(_vOffset, 0, maxVal);
-            _vOffset = _vScrollBar.Value;
-        }
+        ClampVerticalOffset();
 
         Invalidate();
+    }
+
+    /// <summary>
+    /// Scrolls the list so the row of <paramref name="model"/> sits at the top of the visible rows, as
+    /// far as the list allows: the last screenful of rows cannot be moved that far up, and a row that
+    /// close to the end of the list then sits as high as it can. Ancestors are expanded as needed so
+    /// the row is on show at all - what <see cref="SelectModel"/> does to make a selection - while the
+    /// selection itself is left exactly as it is. Returns false when the model is not in the tree.
+    /// </summary>
+    /// <param name="model">The row to bring to the top of the list.</param>
+    public bool ScrollModelToTop(TModel model)
+    {
+        var node = FindNode(model);
+        if (node == null) return false;
+
+        ExpandAncestors(node);
+        RebuildVisibleRows();
+        UpdateScrollbars();
+
+        int rowIndex = _visibleRows.FindIndex(vr => vr.Node == node);
+        if (rowIndex < 0) return false;
+
+        _vOffset = rowIndex * _rowHeight;
+        ClampVerticalOffset();
+        Invalidate();
+        return true;
+    }
+
+    /// <summary>
+    /// Clamps <see cref="_vOffset"/> to the rows on show and hands the result to the vertical
+    /// scrollbar, so a scroll target can be set without ever pointing before the first row or past the
+    /// last one.
+    /// </summary>
+    private void ClampVerticalOffset()
+    {
+        int viewHeight = Math.Max(0, ClientSize.Height - HeaderTotal - (_hScrollBar.Visible ? _hScrollBar.Height : 0));
+        int maxVal = Math.Max(0, (_visibleRows.Count * _rowHeight) - viewHeight);
+
+        if (_vScrollBar.Visible)
+            _vScrollBar.Value = Math.Clamp(_vOffset, 0, maxVal);
+
+        _vOffset = Math.Clamp(_vOffset, 0, maxVal);
     }
 
     // ==================== HIT TESTING ====================
