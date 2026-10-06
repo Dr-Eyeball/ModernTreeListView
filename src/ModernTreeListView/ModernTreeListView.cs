@@ -750,6 +750,19 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public SortOrder SortOrder => _sortOrder;
 
+    /// <summary>
+    /// Optional <b>tie-breaker</b> for the column sort (see <see cref="Sort"/>): the delegate is asked to
+    /// compare two models that the sorted column cannot tell apart, and decides which of them comes first,
+    /// so a list can be ordered by one column <b>and then</b> by another.<br />
+    /// The direction it orders in is its own - it is a plain comparison, applied the same way whichever way
+    /// the column is sorted - so a caller that wants "the same way round as the column" has to look at
+    /// <see cref="SortOrder"/> itself. Leaving it null keeps the plain single-column sort, in which models
+    /// the column cannot tell apart stay in the order they were added.
+    /// </summary>
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Func<TModel, TModel, int>? SecondarySort { get; set; }
+
     // ==================== DATA LOADING ====================
 
     private void LoadRoots(IEnumerable<TModel> roots)
@@ -850,9 +863,21 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
         var col = _columns[_sortColumnIndex];
 
-        return _sortOrder == SortOrder.Ascending
-            ? nodes.OrderBy(n => col.Getter(n.Model), SortValueComparer.Instance).ThenBy(n => n.OriginalIndex)
-            : nodes.OrderByDescending(n => col.Getter(n.Model), SortValueComparer.Instance).ThenBy(n => n.OriginalIndex);
+        IOrderedEnumerable<TreeNode> ordered = _sortOrder == SortOrder.Ascending
+            ? nodes.OrderBy(n => col.Getter(n.Model), SortValueComparer.Instance)
+            : nodes.OrderByDescending(n => col.Getter(n.Model), SortValueComparer.Instance);
+
+        // Models the sorted column cannot tell apart are put in the order the tie-breaker gives them (when
+        // one is set); whatever it cannot tell apart either keeps the order the rows were added in, which
+        // is what the OriginalIndex pass at the end does.
+        Func<TModel, TModel, int>? tieBreak = SecondarySort;
+        if (tieBreak != null)
+        {
+            var byTieBreak = Comparer<TreeNode>.Create((a, b) => tieBreak(a.Model, b.Model));
+            ordered = ordered.ThenBy(n => n, byTieBreak);
+        }
+
+        return ordered.ThenBy(n => n.OriginalIndex);
     }
 
     private bool NodeHasChildren(TreeNode node)
@@ -2373,6 +2398,17 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
             g.FillRectangle(b, cellRect);
         }
 
+        // Optional per-cell segments (see TreeListColumn.Segments): several runs of text in one cell, each
+        // in its own colours - e.g. an asset's tags, one segment per tag. They are drawn whether the row is
+        // selected or not, because their colours are the reading - the row's highlight is behind them - and
+        // a cell whose segments say nothing is drawn as ordinary text, below.
+        IReadOnlyList<TreeListCellSegment>? segments = column.Segments?.Invoke(model);
+        if (segments is { Count: > 0 })
+        {
+            DrawCellSegments(g, cellRect, segments);
+            return;
+        }
+
         string text = GetDisplayText(model, column);
         var textColor = column.ForeColor?.Invoke(model)
             ?? (isSelected ? SelectionForeColor : ForeColor);
@@ -2404,6 +2440,65 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
         TextRenderer.DrawText(g, text, Font, textRect, textColor, flags);
     }
+
+    /// <summary>
+    /// Draws a cell's segments (see <see cref="TreeListColumn{TModel}.Segments"/>) left to right: each is
+    /// filled with its own background and its text drawn in its own foreground, with a small gap between
+    /// one segment and the next.<br />
+    /// A segment wider than the room left is shortened with an ellipsis, and the segments after it are not
+    /// drawn at all - there is nowhere to put them.
+    /// </summary>
+    /// <param name="g">The graphics to draw on.</param>
+    /// <param name="cellRect">The cell's rectangle.</param>
+    /// <param name="segments">The segments to draw, in the order they read.</param>
+    private void DrawCellSegments(Graphics g, Rectangle cellRect, IReadOnlyList<TreeListCellSegment> segments)
+    {
+        const int segmentPadding = 3;   // breathing space inside a segment's own background
+        const int segmentGap = 4;       // space between one segment and the next
+
+        int left = cellRect.Left + CellPadding;
+        int right = cellRect.Right - CellPadding;
+        int height = Math.Max(1, cellRect.Height - 6);
+        int top = cellRect.Top + (cellRect.Height - height) / 2;
+
+        foreach (TreeListCellSegment segment in segments)
+        {
+            if (left >= right || segment.Text.Length == 0)
+                return;
+
+            Size size = TextRenderer.MeasureText(g, segment.Text, Font, new Size(int.MaxValue, height),
+                SegmentTextFlags);
+
+            int width = Math.Min(size.Width + segmentPadding * 2, right - left);
+            var rect = new Rectangle(left, top, Math.Max(1, width), height);
+
+            if (segment.BackColor != Color.Empty)
+            {
+                using var brush = new SolidBrush(segment.BackColor);
+                g.FillRectangle(brush, rect);
+            }
+
+            TextRenderer.DrawText(
+                g,
+                segment.Text,
+                Font,
+                new Rectangle(
+                    rect.Left + segmentPadding,
+                    rect.Top,
+                    Math.Max(1, rect.Width - segmentPadding * 2),
+                    rect.Height),
+                segment.ForeColor,
+                SegmentTextFlags | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                    | TextFormatFlags.PreserveGraphicsClipping);
+
+            left = rect.Right + segmentGap;
+        }
+    }
+
+    /// <summary>The flags a segment is measured and drawn with: one line, and no padding of its own, so the
+    /// width the segment is given is exactly the text's width plus the padding this control adds.</summary>
+    private const TextFormatFlags SegmentTextFlags =
+        TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.NoPadding;
 
     private void DrawModernExpander(Graphics g, Rectangle rect, bool expanded, bool selected)
     {
@@ -3237,11 +3332,47 @@ public sealed class TreeListColumn<TModel>
     /// </summary>
     public Func<TModel, Image?>? Icon { get; set; }
 
+    /// <summary>
+    /// Optional per-cell text drawn as <b>segments</b> rather than as one run: every segment carries its
+    /// own foreground and background colour, so several short values (tags, flags, ...) read apart inside
+    /// one cell. Return null, or an empty list, to draw the cell's ordinary text instead (see
+    /// <see cref="TreeListCellSegment"/>).
+    /// </summary>
+    public Func<TModel, IReadOnlyList<TreeListCellSegment>>? Segments { get; set; }
+
     internal TreeListColumn(string title, Func<TModel, object?> getter, int width)
     {
         Title = title;
         Getter = getter;
         Width = Math.Max(width, MinWidth);
+    }
+}
+
+/// <summary>
+/// One run of a cell's text, drawn in colours of its own (see <see cref="TreeListColumn{TModel}.Segments"/>):
+/// the text, the colour it is drawn in, and the colour filled behind it.
+/// </summary>
+public sealed class TreeListCellSegment
+{
+    /// <summary>The segment's text (never null).</summary>
+    public string Text { get; set; }
+
+    /// <summary>The colour the text is drawn in.</summary>
+    public Color ForeColor { get; set; }
+
+    /// <summary>The colour filled behind the text; <see cref="Color.Empty"/> fills nothing, so the row
+    /// background shows through.</summary>
+    public Color BackColor { get; set; }
+
+    /// <summary>Creates a segment.</summary>
+    /// <param name="text">The text to draw.</param>
+    /// <param name="foreColor">The colour to draw it in.</param>
+    /// <param name="backColor">The colour to fill behind it; <see cref="Color.Empty"/> fills nothing.</param>
+    public TreeListCellSegment(string text, Color foreColor, Color backColor = default)
+    {
+        Text = text ?? "";
+        ForeColor = foreColor;
+        BackColor = backColor;
     }
 }
 
