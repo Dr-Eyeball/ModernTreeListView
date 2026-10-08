@@ -2441,6 +2441,18 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         TextRenderer.DrawText(g, text, Font, textRect, textColor, flags);
     }
 
+    /// <summary>The flags a segment is measured and drawn with: one line, and no padding of its own, so the
+    /// width the segment is given is exactly the text's width plus the padding this control adds.</summary>
+    private const TextFormatFlags SegmentTextFlags =
+        TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.NoPadding;
+
+    /// <summary>Breathing space inside a segment's own background.</summary>
+    private const int SegmentPadding = 3;
+
+    /// <summary>Space between one segment and the next (see <see cref="SegmentToolTipAt"/> for how a
+    /// pointer in that gap is shared by the two segments around it).</summary>
+    private const int SegmentGap = 4;
+
     /// <summary>
     /// Draws a cell's segments (see <see cref="TreeListColumn{TModel}.Segments"/>) left to right: each is
     /// filled with its own background and its text drawn in its own foreground, with a small gap between
@@ -2453,25 +2465,8 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
     /// <param name="segments">The segments to draw, in the order they read.</param>
     private void DrawCellSegments(Graphics g, Rectangle cellRect, IReadOnlyList<TreeListCellSegment> segments)
     {
-        const int segmentPadding = 3;   // breathing space inside a segment's own background
-        const int segmentGap = 4;       // space between one segment and the next
-
-        int left = cellRect.Left + CellPadding;
-        int right = cellRect.Right - CellPadding;
-        int height = Math.Max(1, cellRect.Height - 6);
-        int top = cellRect.Top + (cellRect.Height - height) / 2;
-
-        foreach (TreeListCellSegment segment in segments)
+        foreach (var (segment, rect) in LayoutCellSegments(cellRect, segments))
         {
-            if (left >= right || segment.Text.Length == 0)
-                return;
-
-            Size size = TextRenderer.MeasureText(g, segment.Text, Font, new Size(int.MaxValue, height),
-                SegmentTextFlags);
-
-            int width = Math.Min(size.Width + segmentPadding * 2, right - left);
-            var rect = new Rectangle(left, top, Math.Max(1, width), height);
-
             if (segment.BackColor != Color.Empty)
             {
                 using var brush = new SolidBrush(segment.BackColor);
@@ -2483,22 +2478,73 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
                 segment.Text,
                 Font,
                 new Rectangle(
-                    rect.Left + segmentPadding,
+                    rect.Left + SegmentPadding,
                     rect.Top,
-                    Math.Max(1, rect.Width - segmentPadding * 2),
+                    Math.Max(1, rect.Width - SegmentPadding * 2),
                     rect.Height),
                 segment.ForeColor,
                 SegmentTextFlags | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
                     | TextFormatFlags.PreserveGraphicsClipping);
-
-            left = rect.Right + segmentGap;
         }
     }
 
-    /// <summary>The flags a segment is measured and drawn with: one line, and no padding of its own, so the
-    /// width the segment is given is exactly the text's width plus the padding this control adds.</summary>
-    private const TextFormatFlags SegmentTextFlags =
-        TextFormatFlags.SingleLine | TextFormatFlags.Left | TextFormatFlags.NoPadding;
+    /// <summary>
+    /// Where a cell's segments sit, left to right, in the order they read: the layout a cell is drawn from,
+    /// and the one the segment under the pointer is found in (see <see cref="SegmentToolTipAt"/>) - kept in
+    /// one place so what is drawn and what answers the pointer cannot drift apart.<br />
+    /// The text is measured without a graphics' device context (the control's font at the system's DPI),
+    /// because finding the segment under the pointer happens with no paint in progress; the drawing above
+    /// measures the same way, so both see the same widths.
+    /// </summary>
+    /// <param name="cellRect">The cell's rectangle.</param>
+    /// <param name="segments">The segments to lay out.</param>
+    private List<(TreeListCellSegment Segment, Rectangle Rect)> LayoutCellSegments(
+        Rectangle cellRect, IReadOnlyList<TreeListCellSegment> segments)
+    {
+        var laid = new List<(TreeListCellSegment Segment, Rectangle Rect)>();
+
+        int left = cellRect.Left + CellPadding;
+        int right = cellRect.Right - CellPadding;
+        int height = Math.Max(1, cellRect.Height - 6);
+        int top = cellRect.Top + (cellRect.Height - height) / 2;
+
+        foreach (TreeListCellSegment segment in segments)
+        {
+            if (left >= right || segment.Text.Length == 0)
+                break;   // there is nowhere to put this one, so the ones after it are not laid out either
+
+            Size size = TextRenderer.MeasureText(
+                segment.Text, Font, new Size(int.MaxValue, height), SegmentTextFlags);
+
+            int width = Math.Min(size.Width + SegmentPadding * 2, right - left);
+            var rect = new Rectangle(left, top, Math.Max(1, width), height);
+
+            laid.Add((segment, rect));
+            left = rect.Right + SegmentGap;
+        }
+
+        return laid;
+    }
+
+    /// <summary>
+    /// The tooltip of the segment the pointer at <paramref name="x"/> is over, or an empty string when it
+    /// is over none of them (see <see cref="TreeListCellSegment.ToolTip"/>).<br />
+    /// The gap between two segments counts as both of them, so a pointer in it is not answered with
+    /// nothing; a segment asked first answers first.
+    /// </summary>
+    /// <param name="cellRect">The cell's rectangle.</param>
+    /// <param name="segments">The cell's segments.</param>
+    /// <param name="x">The pointer's x, in the control's coordinates.</param>
+    private string SegmentToolTipAt(Rectangle cellRect, IReadOnlyList<TreeListCellSegment> segments, int x)
+    {
+        foreach (var (segment, rect) in LayoutCellSegments(cellRect, segments))
+        {
+            if (x >= rect.Left - (SegmentGap / 2) && x <= rect.Right + (SegmentGap / 2))
+                return segment.ToolTip ?? "";
+        }
+
+        return "";
+    }
 
     private void DrawModernExpander(Graphics g, Rectangle rect, bool expanded, bool selected)
     {
@@ -2753,7 +2799,7 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         if (e.Y < HeaderTotal)
         {
             SetHoverRow(-1);
-            UpdateToolTip(default);
+            UpdateToolTip(default, e.X);   // nothing above the rows carries segments
 
             var hit = HitTest(e.X, e.Y);
             if (hit.ColumnIndex >= 0)
@@ -2774,14 +2820,14 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
 
         var rowHit = HitTest(e.X, e.Y);
         SetHoverRow(!rowHit.IsHeader && rowHit.IsValid ? rowHit.RowIndex : -1);
-        UpdateToolTip(rowHit);
+        UpdateToolTip(rowHit, e.X);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
         base.OnMouseLeave(e);
         SetHoverRow(-1);
-        UpdateToolTip(default);
+        UpdateToolTip(default, 0);
     }
 
     private void SetHoverRow(int rowIndex)
@@ -2793,7 +2839,17 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         if (rowIndex >= 0) InvalidateRow(rowIndex);
     }
 
-    private void UpdateToolTip(HitTestResult hit)
+    /// <summary>
+    /// Shows, in the control's tooltip, what the cell the pointer is over has to say about itself: the
+    /// cell's own text when that text does not fit, and - for a cell drawn from segments - the tooltip of
+    /// the segment under the pointer (see <see cref="TreeListCellSegment.ToolTip"/>), which is the more
+    /// use the closer the pointer is to one of them.<br />
+    /// A cell whose segments carry nothing falls back to the text rule, and a pointer over no cell shows
+    /// no tooltip at all.
+    /// </summary>
+    /// <param name="hit">What the pointer is over.</param>
+    /// <param name="pointerX">The pointer's x, in the control's coordinates, for naming the segment.</param>
+    private void UpdateToolTip(HitTestResult hit, int pointerX)
     {
         string text = string.Empty;
 
@@ -2802,25 +2858,41 @@ public sealed class ModernTreeListView<TModel> : Control where TModel : notnull
         {
             var vrow = _visibleRows[hit.RowIndex];
             var column = _columns[hit.ColumnIndex];
-            string display = GetDisplayText(vrow.Node.Model, column);
 
-            if (display.Length > 0)
+            // The segments of a row's own cell are asked first: each explains itself, so the pointer being
+            // over the tag it names is answered with that tag rather than with the whole cell's reading.
+            if (column.Segments != null)
             {
-                var cellRect = GetCellRectangle(hit.RowIndex, hit.ColumnIndex);
-                int available;
-                if (hit.ColumnIndex == 0)
+                IReadOnlyList<TreeListCellSegment>? segments = column.Segments(vrow.Node.Model);
+                if (segments is { Count: > 0 })
                 {
-                    var layout = GetTreeCellLayout(vrow, cellRect);
-                    available = cellRect.Right - layout.ContentLeft - CellPadding;
+                    text = SegmentToolTipAt(
+                        GetCellRectangle(hit.RowIndex, hit.ColumnIndex), segments, pointerX);
                 }
-                else
-                {
-                    available = cellRect.Width - CellPadding * 2;
-                }
+            }
 
-                int needed = TextRenderer.MeasureText(display, Font).Width;
-                if (needed > available)
-                    text = display;
+            if (text.Length == 0)
+            {
+                string display = GetDisplayText(vrow.Node.Model, column);
+
+                if (display.Length > 0)
+                {
+                    var cellRect = GetCellRectangle(hit.RowIndex, hit.ColumnIndex);
+                    int available;
+                    if (hit.ColumnIndex == 0)
+                    {
+                        var layout = GetTreeCellLayout(vrow, cellRect);
+                        available = cellRect.Right - layout.ContentLeft - CellPadding;
+                    }
+                    else
+                    {
+                        available = cellRect.Width - CellPadding * 2;
+                    }
+
+                    int needed = TextRenderer.MeasureText(display, Font).Width;
+                    if (needed > available)
+                        text = display;
+                }
             }
         }
 
@@ -3350,7 +3422,8 @@ public sealed class TreeListColumn<TModel>
 
 /// <summary>
 /// One run of a cell's text, drawn in colours of its own (see <see cref="TreeListColumn{TModel}.Segments"/>):
-/// the text, the colour it is drawn in, and the colour filled behind it.
+/// the text, the colour it is drawn in, the colour filled behind it, and what it says about itself while
+/// the pointer is over it.
 /// </summary>
 public sealed class TreeListCellSegment
 {
@@ -3363,6 +3436,15 @@ public sealed class TreeListCellSegment
     /// <summary>The colour filled behind the text; <see cref="Color.Empty"/> fills nothing, so the row
     /// background shows through.</summary>
     public Color BackColor { get; set; }
+
+    /// <summary>
+    /// What the segment explains about itself as a tooltip, shown while the pointer is over it: an empty
+    /// string, which is the default, shows nothing.<br />
+    /// It belongs to the <b>segment</b> rather than to the cell, so a cell drawn from several of them can
+    /// explain each one - the tags of an asset, one tooltip per tag, are what this is for. A cell whose
+    /// segments say nothing here still shows its own text when that text does not fit.
+    /// </summary>
+    public string ToolTip { get; set; } = "";
 
     /// <summary>Creates a segment.</summary>
     /// <param name="text">The text to draw.</param>
